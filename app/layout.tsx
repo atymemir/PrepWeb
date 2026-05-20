@@ -1,35 +1,30 @@
 import "./globals.css";
 import Link from "next/link";
+import BottomNav from "./components/BottomNav";
 
-export const metadata = {
-  title: "PrepWeb",
-  description: "Focused SAT practice",
-};
-
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="bg-gray-50 text-gray-900">
-        <div className="sticky top-0 z-50 border-b bg-white">
-          <div className="mx-auto max-w-3xl px-6 py-3 flex items-center justify-between">
-            <Link href="/today" className="font-semibold">PrepWeb</Link>
-            <nav className="flex gap-4 text-sm">
-              <Link className="hover:underline" href="/today">Today</Link>
-              <Link className="hover:underline" href="/practice?subject=Reading">Practice</Link>
-              <Link className="hover:underline" href="/skills">Skills</Link>
-              <Link className="hover:underline" href="/leagues">Leagues</Link>
-              <Link className="hover:underline" href="/profile">Profile</Link>
-            </nav>
+      <body className="bg-white text-black">
+        {/* Top bar */}
+        <div className="sticky top-0 z-40 border-b border-gray-200 bg-white">
+          <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
+            <Link href="/today" className="text-sm font-extrabold tracking-[0.18em]">
+              ALGA
+            </Link>
+            <Link href="/profile" className="text-sm font-semibold text-gray-600 hover:text-black">
+              Profile
+            </Link>
           </div>
         </div>
 
-        <div className="mx-auto max-w-3xl px-6 py-6">
+        {/* Content */}
+        <main className="mx-auto max-w-3xl px-4 pb-24 pt-5">
           {children}
-        </div>
+        </main>
+
+        {/* Bottom tabs */}
+        <BottomNav />
       </body>
     </html>
   );
