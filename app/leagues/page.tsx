@@ -16,34 +16,22 @@ type Entry = {
 };
 
 export default function LeaguesPage() {
+
+  const supabase = getSupabase();
   const router = useRouter();
   const [rows, setRows] = useState<Entry[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
-  async function load() {
-    try {
-      const supabase = getSupabase(); // ✅ only inside function
-
-      const { data: sess, error: sessErr } = await supabase.auth.getSession();
-      if (sessErr) throw new Error(sessErr.message);
-      if (!sess.session) {
-        router.push("/login");
-        return;
-      }
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      if (!data.session) return router.push("/login");
 
       const { data: res, error } = await supabase.rpc("get_weekly_leaderboard");
-      if (error) throw new Error(error.message);
-
+      if (error) return setErr(error.message);
       setRows((res ?? []) as Entry[]);
-    } catch (e: any) {
-      setErr(e?.message || "Unknown error");
-    }
-  }
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    })();
+  }, [router]);
 
   return (
     <main className="min-h-screen p-6 max-w-3xl mx-auto">
@@ -52,11 +40,7 @@ export default function LeaguesPage() {
 
       <div className="mt-6 rounded-2xl border bg-white shadow-sm">
         {err && <div className="p-4 text-sm text-red-600">{err}</div>}
-        {!err && rows.length === 0 && (
-          <div className="p-4 text-sm text-gray-600">
-            No activity yet this week.
-          </div>
-        )}
+        {!err && rows.length === 0 && <div className="p-4 text-sm text-gray-600">No activity yet this week.</div>}
 
         <ul>
           {rows.slice(0, 50).map((e, i) => (

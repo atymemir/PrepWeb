@@ -41,6 +41,7 @@ function daysUntil(iso: string | null): number | null {
   if (isNaN(d.getTime())) return null;
 
   const now = new Date();
+  // normalize to local dates
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const end = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   return Math.round((end - start) / (1000 * 60 * 60 * 24));
@@ -53,6 +54,8 @@ function confidenceLabel(n: number): "Low" | "Medium" | "High" {
 }
 
 export default function TodayPage() {
+
+  const supabase = getSupabase();
   const router = useRouter();
 
   const [loading, setLoading] = useState(true);
@@ -62,6 +65,7 @@ export default function TodayPage() {
   const [leaderboard, setLeaderboard] = useState<LeaderEntry[]>([]);
   const [skillsReading, setSkillsReading] = useState<SkillRow[]>([]);
   const [skillsMath, setSkillsMath] = useState<SkillRow[]>([]);
+
   const [subjectFocus, setSubjectFocus] = useState<"Reading" | "Math">("Reading");
 
   const nickname = useMemo(() => profile?.nickname?.trim() || "Student", [profile]);
@@ -90,9 +94,10 @@ export default function TodayPage() {
 
   const weakestReading = useMemo(() => {
     if (!skillsReading.length) return null;
+    // choose lowest accuracy with reasonable attempts first
     const sorted = [...skillsReading].sort((a, b) => {
-      const aScore = (a.accuracy ?? 0) + (a.attempts < 6 ? 0.15 : 0);
-      const bScore = (b.accuracy ?? 0) + (b.attempts < 6 ? 0.15 : 0);
+      const aScore = a.accuracy + (a.attempts < 6 ? 0.15 : 0); // penalize low sample
+      const bScore = b.accuracy + (b.attempts < 6 ? 0.15 : 0);
       if (aScore !== bScore) return aScore - bScore;
       return b.attempts - a.attempts;
     });
@@ -102,8 +107,8 @@ export default function TodayPage() {
   const weakestMath = useMemo(() => {
     if (!skillsMath.length) return null;
     const sorted = [...skillsMath].sort((a, b) => {
-      const aScore = (a.accuracy ?? 0) + (a.attempts < 6 ? 0.15 : 0);
-      const bScore = (b.accuracy ?? 0) + (b.attempts < 6 ? 0.15 : 0);
+      const aScore = a.accuracy + (a.attempts < 6 ? 0.15 : 0);
+      const bScore = b.accuracy + (b.attempts < 6 ? 0.15 : 0);
       if (aScore !== bScore) return aScore - bScore;
       return b.attempts - a.attempts;
     });
@@ -123,20 +128,16 @@ export default function TodayPage() {
     setLoading(true);
     setErr(null);
 
+    const { data: sessionData } = await supabase.auth.getSession();
+    const session = sessionData.session;
+    if (!session) {
+      router.push("/login");
+      return;
+    }
+
+    const userId = session.user.id;
+
     try {
-      const supabase = getSupabase(); // ✅ only inside function
-
-      const { data: sessionData, error: sessErr } = await supabase.auth.getSession();
-      if (sessErr) throw new Error(sessErr.message);
-
-      const session = sessionData.session;
-      if (!session) {
-        router.push("/login");
-        return;
-      }
-
-      const userId = session.user.id;
-
       const p = await supabase
         .from("profiles")
         .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level")
@@ -144,8 +145,7 @@ export default function TodayPage() {
         .single();
 
       if (p.error) throw new Error(p.error.message);
-      const prof = p.data as Profile;
-      setProfile(prof);
+      setProfile(p.data as Profile);
 
       const lb = await supabase.rpc("get_weekly_leaderboard");
       if (lb.error) throw new Error(lb.error.message);
@@ -159,9 +159,10 @@ export default function TodayPage() {
       if (sM.error) throw new Error(sM.error.message);
       setSkillsMath((sM.data ?? []) as SkillRow[]);
 
-      const w = prof?.weakest_area?.toLowerCase() ?? "";
+      // Pick a sensible default focus:
+      // If profile.weakest_area mentions Reading, focus Reading, else Math.
+      const w = (p.data as Profile)?.weakest_area?.toLowerCase() ?? "";
       setSubjectFocus(w.includes("read") ? "Reading" : "Math");
-
     } catch (e: any) {
       setErr(e?.message || "Unknown error");
     } finally {
@@ -170,15 +171,11 @@ export default function TodayPage() {
   }
 
   async function logout() {
-    try {
-      const supabase = getSupabase(); // ✅ only inside function
-      await supabase.auth.signOut();
-    } catch {}
+    await supabase.auth.signOut();
     router.push("/login");
   }
 
   useEffect(() => {
-    // ✅ supabase called only inside loadAll
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -212,6 +209,7 @@ export default function TodayPage() {
 
       {!loading && !err && (
         <div className="mt-6 grid gap-4">
+          {/* Primary CTA */}
           <div className="rounded-2xl border bg-white p-6 shadow-sm">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -258,6 +256,7 @@ export default function TodayPage() {
             </div>
           </div>
 
+          {/* Weekly stats */}
           <div className="rounded-2xl border bg-white p-6 shadow-sm">
             <div className="text-sm font-semibold text-gray-700">This week</div>
             <div className="mt-3 grid grid-cols-2 gap-4">
@@ -280,6 +279,7 @@ export default function TodayPage() {
             </div>
           </div>
 
+          {/* Quick links */}
           <div className="rounded-2xl border bg-white p-6 shadow-sm">
             <div className="text-sm font-semibold text-gray-700">Quick actions</div>
             <div className="mt-3 grid gap-3">

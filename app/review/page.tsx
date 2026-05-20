@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import { getSupabase } from "@/app/lib/supabase";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "@/app/ui/ui";
 
+export default function ReviewPage() {
+
 type Question = {
   id: string;
   subject: string;
@@ -20,7 +22,7 @@ type Question = {
   difficulty_level: number | null;
 };
 
-export default function ReviewPage() {
+  const supabase = getSupabase();
   const router = useRouter();
   const limit = 12;
 
@@ -36,6 +38,7 @@ export default function ReviewPage() {
 
   const [startedAt, setStartedAt] = useState<number>(Date.now());
   const [answers, setAnswers] = useState<Record<string, { selected: string; correct: boolean }>>({});
+  const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
 
   const q = questions[idx];
@@ -65,36 +68,35 @@ export default function ReviewPage() {
     setLoading(true);
     setErr(null);
 
-    try {
-      const supabase = getSupabase();
-
-      const { data: sessionData, error: sessErr } = await supabase.auth.getSession();
-      if (sessErr) throw new Error(sessErr.message);
-      if (!sessionData.session) {
-        router.push("/login");
-        return;
-      }
-
-      const { data, error } = await supabase.rpc("get_due_review_questions", { p_limit: limit });
-      if (error) throw new Error(error.message);
-
-      const list = (data ?? []) as Question[];
-      setQuestions(list);
-
-      setIdx(0);
-      setSelected(null);
-      setLocked(false);
-      setFeedback(null);
-      setAnswers({});
-      setStartedAt(Date.now());
-      setDone(false);
-
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load review.");
-      setQuestions([]);
-    } finally {
-      setLoading(false);
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session) {
+      router.push("/login");
+      return;
     }
+
+    const { data, error } = await supabase.rpc("get_due_review_questions", { p_limit: limit });
+    setLoading(false);
+
+    if (error) {
+      setErr(error.message);
+      setQuestions([]);
+      return;
+    }
+
+    const list = (data ?? []) as Question[];
+    if (!list.length) {
+      setQuestions([]);
+      return;
+    }
+
+    setQuestions(list);
+    setIdx(0);
+    setSelected(null);
+    setLocked(false);
+    setFeedback(null);
+    setAnswers({});
+    setStartedAt(Date.now());
+    setDone(false);
   }
 
   useEffect(() => {
@@ -108,29 +110,26 @@ export default function ReviewPage() {
     const timeTaken = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
     const isCorrect = selected.toUpperCase() === q.correct_option.toUpperCase();
 
-    try {
-      const supabase = getSupabase();
+    // immediately record event server-side (this updates spacing schedule)
+    const { error } = await supabase.rpc("record_answer_event", {
+      p_question_id: q.id,
+      p_selected_option: selected.toUpperCase(),
+      p_is_correct: isCorrect,
+      p_is_review: true,
+      p_time_taken_seconds: timeTaken,
+    });
 
-      const { error } = await supabase.rpc("record_answer_event", {
-        p_question_id: q.id,
-        p_selected_option: selected.toUpperCase(),
-        p_is_correct: isCorrect,
-        p_is_review: true,
-        p_time_taken_seconds: timeTaken,
-      });
-
-      if (error) throw new Error(error.message);
-
-      setAnswers(prev => ({ ...prev, [q.id]: { selected: selected.toUpperCase(), correct: isCorrect } }));
-      setFeedback({ correct: isCorrect, correctOption: q.correct_option.toUpperCase() });
-      setLocked(true);
-
-    } catch (e: any) {
-      setErr(e?.message || "Failed to save review result.");
+    if (error) {
+      setErr(error.message);
+      return;
     }
+
+    setAnswers(prev => ({ ...prev, [q.id]: { selected: selected.toUpperCase(), correct: isCorrect } }));
+    setFeedback({ correct: isCorrect, correctOption: q.correct_option.toUpperCase() });
+    setLocked(true);
   }
 
-  function nextOrFinish() {
+  async function nextOrFinish() {
     if (!q) return;
 
     const isLast = idx >= questions.length - 1;
@@ -190,7 +189,7 @@ export default function ReviewPage() {
           </div>
 
           <div className="mt-4 text-sm text-gray-700">
-            Correct streak schedules items further out. Wrong answers return sooner.
+            Your correct streak schedules items further out. Wrong answers return sooner.
           </div>
 
           <div className="mt-5 grid gap-3">
@@ -227,6 +226,7 @@ export default function ReviewPage() {
                   key={letter}
                   onClick={() => pick(letter)}
                   className={`w-full text-left rounded-xl p-4 ${cls}`}
+                  disabled={saving}
                 >
                   <div className="text-xs font-semibold text-gray-500 mb-1">{letter}</div>
                   <div className="text-sm text-gray-800">{optionText(letter)}</div>
@@ -237,11 +237,11 @@ export default function ReviewPage() {
 
           <div className="mt-6 flex gap-3 items-start">
             {!locked ? (
-              <PrimaryButton onClick={submit} disabled={!selected}>
+              <PrimaryButton onClick={submit} disabled={!selected || saving}>
                 Submit
               </PrimaryButton>
             ) : (
-              <PrimaryButton onClick={nextOrFinish}>
+              <PrimaryButton onClick={nextOrFinish} disabled={saving}>
                 {idx === total - 1 ? "Finish" : "Next"}
               </PrimaryButton>
             )}

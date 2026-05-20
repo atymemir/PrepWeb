@@ -5,6 +5,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "@/app/lib/supabase";
 
+export default function ProfilePage() {
+
 type Profile = {
   id: string;
   nickname: string | null;
@@ -12,11 +14,12 @@ type Profile = {
   daily_study_hours: number | null;
   weakest_area: string | null;
   current_level: string | null;
-  exam_date: string | null;
+  exam_date: string | null; // timestamptz from supabase
 };
 
 function isoToDateInput(iso: string | null): string {
   if (!iso) return "";
+  // Handles both "2026-05-20T..." and "2026-05-20"
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "";
   const yyyy = d.getFullYear();
@@ -27,10 +30,11 @@ function isoToDateInput(iso: string | null): string {
 
 function dateInputToISO(dateStr: string): string | null {
   if (!dateStr) return null;
+  // store as UTC midnight
   return new Date(`${dateStr}T00:00:00.000Z`).toISOString();
 }
 
-export default function ProfilePage() {
+  const supabase = getSupabase();
   const router = useRouter();
 
   const [loading, setLoading] = useState(true);
@@ -40,20 +44,16 @@ export default function ProfilePage() {
 
   const [profile, setProfile] = useState<Profile | null>(null);
 
+  // editable fields
   const [nickname, setNickname] = useState("");
   const [targetScore, setTargetScore] = useState("1400");
   const [dailyHours, setDailyHours] = useState("2");
-  const [examDate, setExamDate] = useState("");
+  const [examDate, setExamDate] = useState(""); // YYYY-MM-DD
 
-  async function ensureAuth(): Promise<string | null> {
-    const supabase = getSupabase();
-    const { data, error } = await supabase.auth.getSession();
-    if (error) throw new Error(error.message);
-    if (!data.session) {
-      router.push("/login");
-      return null;
-    }
-    return data.session.user.id;
+  async function ensureAuth() {
+    const { data } = await supabase.auth.getSession();
+    if (!data.session) router.push("/login");
+    return data.session?.user.id ?? null;
   }
 
   async function loadProfile() {
@@ -61,30 +61,28 @@ export default function ProfilePage() {
     setErr(null);
     setMsg(null);
 
-    try {
-      const supabase = getSupabase();
-      const userId = await ensureAuth();
-      if (!userId) return;
+    const userId = await ensureAuth();
+    if (!userId) return;
 
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("id,nickname,target_score,daily_study_hours,weakest_area,current_level,exam_date")
-        .eq("id", userId)
-        .single();
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id,nickname,target_score,daily_study_hours,weakest_area,current_level,exam_date")
+      .eq("id", userId)
+      .single();
 
-      if (error) throw new Error(error.message);
+    setLoading(false);
 
-      const p = data as Profile;
-      setProfile(p);
-      setNickname(p.nickname ?? "");
-      setTargetScore(String(p.target_score ?? 1400));
-      setDailyHours(String(p.daily_study_hours ?? 2));
-      setExamDate(isoToDateInput(p.exam_date));
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load profile.");
-    } finally {
-      setLoading(false);
+    if (error) {
+      setErr(error.message);
+      return;
     }
+
+    const p = data as Profile;
+    setProfile(p);
+    setNickname(p.nickname ?? "");
+    setTargetScore(String(p.target_score ?? 1400));
+    setDailyHours(String(p.daily_study_hours ?? 2));
+    setExamDate(isoToDateInput(p.exam_date));
   }
 
   async function save() {
@@ -94,37 +92,31 @@ export default function ProfilePage() {
     setErr(null);
     setMsg(null);
 
-    try {
-      const supabase = getSupabase();
+    const payload: Partial<Profile> = {
+      nickname: nickname.trim() || null,
+      target_score: Number.isFinite(Number(targetScore)) ? Number(targetScore) : 1400,
+      daily_study_hours: Number.isFinite(Number(dailyHours)) ? Number(dailyHours) : 2,
+      exam_date: dateInputToISO(examDate),
+    };
 
-      const payload: Partial<Profile> = {
-        nickname: nickname.trim() || null,
-        target_score: Number.isFinite(Number(targetScore)) ? Number(targetScore) : 1400,
-        daily_study_hours: Number.isFinite(Number(dailyHours)) ? Number(dailyHours) : 2,
-        exam_date: dateInputToISO(examDate),
-      };
+    const { error } = await supabase
+      .from("profiles")
+      .update(payload)
+      .eq("id", profile.id);
 
-      const { error } = await supabase
-        .from("profiles")
-        .update(payload)
-        .eq("id", profile.id);
+    setSaving(false);
 
-      if (error) throw new Error(error.message);
-
-      setMsg("Saved.");
-      await loadProfile();
-    } catch (e: any) {
-      setErr(e?.message || "Failed to save.");
-    } finally {
-      setSaving(false);
+    if (error) {
+      setErr(error.message);
+      return;
     }
+
+    setMsg("Saved.");
+    await loadProfile();
   }
 
   async function logout() {
-    try {
-      const supabase = getSupabase();
-      await supabase.auth.signOut();
-    } catch {}
+    await supabase.auth.signOut();
     router.push("/login");
   }
 
