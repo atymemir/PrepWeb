@@ -1,65 +1,111 @@
-import Image from "next/image";
+import Link from "next/link";
 
-export default function Home() {
+export default function HomePage() {
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <main className="min-h-screen">
+      {/* HERO */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-6">
+        <div className="inline-flex items-center rounded-full border border-gray-200 px-3 py-1 text-xs font-semibold text-gray-600">
+          Digital SAT • Practice + Review + Skills Map
+        </div>
+
+        <h1 className="mt-4 text-3xl font-semibold tracking-tight">
+          ALGA — focused SAT practice that actually compounds.
+        </h1>
+
+        <p className="mt-3 text-sm text-gray-600 leading-relaxed">
+          Not a fake “AI score predictor”. ALGA is a calm, serious SAT system:
+          12-question practice sets, spaced review of mistakes, and a skills map that tells you exactly what to fix next.
+        </p>
+
+        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+          <Link
+            href="/today"
+            className="inline-flex items-center justify-center rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white hover:opacity-90 transition"
+          >
+            Open the app
+          </Link>
+
+          <Link
+            href="/practice?subject=Reading"
+            className="inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-black hover:bg-gray-50 transition"
+          >
+            Try a 12Q practice set
+          </Link>
+        </div>
+
+        <div className="mt-4 text-xs text-gray-500">
+          For KBTU students first. We’re shipping weekly updates and improving question quality continuously.
+        </div>
+      </div>
+
+      {/* WHAT YOU GET */}
+      <div className="mt-4 grid gap-4 md:grid-cols-3">
+        <div className="rounded-2xl border border-gray-200 bg-white p-5">
+          <div className="text-sm font-semibold">Practice (12Q)</div>
+          <p className="mt-2 text-sm text-gray-600 leading-relaxed">
+            Short sessions that you can finish. No “infinite grind” — just clean sets with clear feedback.
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        <div className="rounded-2xl border border-gray-200 bg-white p-5">
+          <div className="text-sm font-semibold">Recovery Review</div>
+          <p className="mt-2 text-sm text-gray-600 leading-relaxed">
+            Spaced repetition. Mistakes return when they should — so weak areas stop sticking around forever.
+          </p>
         </div>
-      </main>
-    </div>
+
+        <div className="rounded-2xl border border-gray-200 bg-white p-5">
+          <div className="text-sm font-semibold">Skills Map</div>
+          <p className="mt-2 text-sm text-gray-600 leading-relaxed">
+            Subskill-level mastery view. See your weakest skills and jump straight into practice or lessons.
+          </p>
+        </div>
+      </div>
+
+      {/* ABOUT / WHY */}
+      <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-6">
+        <h2 className="text-xl font-semibold tracking-tight">About</h2>
+
+        <p className="mt-2 text-sm text-gray-600 leading-relaxed">
+          ALGA is being built for students who want a modern SAT system without fake analytics and inflated claims.
+          We keep the product honest: accuracy, practice signals, and actionable next steps — not “predicted SAT”.
+        </p>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <div className="rounded-xl border border-gray-200 p-4">
+            <div className="text-xs font-semibold text-gray-600">Why it works</div>
+            <div className="mt-1 text-sm text-gray-700 leading-relaxed">
+              Consistency beats intensity. ALGA forces small sessions, tracks weak subskills, and brings mistakes back
+              using review scheduling.
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-gray-200 p-4">
+            <div className="text-xs font-semibold text-gray-600">What’s next</div>
+            <div className="mt-1 text-sm text-gray-700 leading-relaxed">
+              Better question sourcing, more lessons, deeper skill breakdown, and a cleaner web/mobile combined platform.
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-5 flex flex-wrap gap-3">
+          <Link className="underline text-sm text-gray-700 hover:text-black" href="/skills">
+            Explore skills map
+          </Link>
+          <Link className="underline text-sm text-gray-700 hover:text-black" href="/leagues">
+            Open weekly leagues
+          </Link>
+          <Link className="underline text-sm text-gray-700 hover:text-black" href="/profile">
+            Set your target & exam date
+          </Link>
+        </div>
+      </div>
+
+      {/* FOOTER */}
+      <div className="mt-6 pb-4 text-xs text-gray-500">
+        © {new Date().getFullYear()} ALGA. Built by students, for students.
+      </div>
+    </main>
   );
 }
