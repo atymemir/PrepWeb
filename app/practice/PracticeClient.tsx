@@ -54,10 +54,7 @@ export default function PracticeClient() {
   const q = questions[idx];
   const total = questions.length;
 
-  const correctCount = useMemo(() => {
-    return Object.values(answers).filter(a => a.is_correct).length;
-  }, [answers]);
-
+  const correctCount = useMemo(() => Object.values(answers).filter(a => a.is_correct).length, [answers]);
   const answeredCount = Object.keys(answers).length;
 
   function optionText(letter: string) {
@@ -287,6 +284,7 @@ export default function PracticeClient() {
                   <div className={`font-semibold ${feedback.correct ? "text-green-700" : "text-red-700"}`}>
                     {feedback.correct ? "Correct" : "Incorrect"}
                   </div>
+
                   {!feedback.correct && (
                     <div className="text-sm text-gray-700 mt-1">
                       Correct answer: <span className="font-semibold">{feedback.correctOption}</span>

@@ -1,0 +1,13 @@
+var R=require("../../../chunks/ssr/[turbopack]_runtime.js")("server/app/lesson/[subskill]/page.js")
+R.c("server/chunks/ssr/[root-of-the-server]__06tz9oj._.js")
+R.c("server/chunks/ssr/0v~o_next_dist_esm_build_templates_app-page_09s_6m3.js")
+R.c("server/chunks/ssr/[root-of-the-server]__06rr6sy._.js")
+R.c("server/chunks/ssr/[root-of-the-server]__04.lxwh._.js")
+R.c("server/chunks/ssr/Desktop_MVP_09.0cee._.js")
+R.c("server/chunks/ssr/0v~o_next_dist_client_components_05wra-a._.js")
+R.c("server/chunks/ssr/0v~o_next_dist_client_components_builtin_forbidden_082-_si.js")
+R.c("server/chunks/ssr/0v~o_next_dist_client_components_builtin_unauthorized_05dyg-c.js")
+R.c("server/chunks/ssr/0v~o_next_dist_client_components_builtin_global-error_0m9baba.js")
+R.c("server/chunks/ssr/Desktop_MVP__next-internal_server_app_lesson_[subskill]_page_actions_01_a.dp.js")
+R.m(48805)
+module.exports=R.m(48805).exports
