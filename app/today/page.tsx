@@ -4,14 +4,15 @@ export const dynamic = 'force-dynamic';
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getSupabase } from "@/app/lib/supabase";
+import { getSupabase } from "../lib/supabase";
+import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Profile = {
   id: string;
   nickname: string | null;
   target_score: number | null;
   daily_study_hours: number | null;
-  exam_date: string | null; // timestamptz
+  exam_date: string | null;
   weakest_area: string | null;
   current_level: string | null;
 };
@@ -35,13 +36,16 @@ type SkillRow = {
   accuracy: number; // 0..1
 };
 
+type Question = {
+  id: string;
+};
+
 function daysUntil(iso: string | null): number | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (isNaN(d.getTime())) return null;
 
   const now = new Date();
-  // normalize to local dates
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const end = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   return Math.round((end - start) / (1000 * 60 * 60 * 24));
@@ -53,9 +57,18 @@ function confidenceLabel(n: number): "Low" | "Medium" | "High" {
   return "High";
 }
 
-export default function TodayPage() {
+function pickWeakest(rows: SkillRow[]): SkillRow | null {
+  if (!rows.length) return null;
+  const sorted = [...rows].sort((a, b) => {
+    const aScore = (a.accuracy ?? 0) + (a.attempts < 6 ? 0.15 : 0);
+    const bScore = (b.accuracy ?? 0) + (b.attempts < 6 ? 0.15 : 0);
+    if (aScore !== bScore) return aScore - bScore;
+    return b.attempts - a.attempts;
+  });
+  return sorted[0] ?? null;
+}
 
-  const supabase = getSupabase();
+export default function TodayPage() {
   const router = useRouter();
 
   const [loading, setLoading] = useState(true);
@@ -65,12 +78,11 @@ export default function TodayPage() {
   const [leaderboard, setLeaderboard] = useState<LeaderEntry[]>([]);
   const [skillsReading, setSkillsReading] = useState<SkillRow[]>([]);
   const [skillsMath, setSkillsMath] = useState<SkillRow[]>([]);
-
-  const [subjectFocus, setSubjectFocus] = useState<"Reading" | "Math">("Reading");
+  const [dueReviewCount, setDueReviewCount] = useState<number>(0);
 
   const nickname = useMemo(() => profile?.nickname?.trim() || "Student", [profile]);
-
   const dleft = useMemo(() => daysUntil(profile?.exam_date ?? null), [profile]);
+
   const countdownText = useMemo(() => {
     if (dleft === null) return "Set SAT date";
     if (dleft < 0) return "Update date";
@@ -92,52 +104,43 @@ export default function TodayPage() {
     return me ? Math.round(me.points) : null;
   }, [leaderboard, profile]);
 
-  const weakestReading = useMemo(() => {
-    if (!skillsReading.length) return null;
-    // choose lowest accuracy with reasonable attempts first
-    const sorted = [...skillsReading].sort((a, b) => {
-      const aScore = a.accuracy + (a.attempts < 6 ? 0.15 : 0); // penalize low sample
-      const bScore = b.accuracy + (b.attempts < 6 ? 0.15 : 0);
-      if (aScore !== bScore) return aScore - bScore;
-      return b.attempts - a.attempts;
-    });
-    return sorted[0];
-  }, [skillsReading]);
+  const subjectFocus = useMemo<"Reading" | "Math">(() => {
+    const w = (profile?.weakest_area ?? "").toLowerCase();
+    return w.includes("read") ? "Reading" : "Math";
+  }, [profile]);
 
-  const weakestMath = useMemo(() => {
-    if (!skillsMath.length) return null;
-    const sorted = [...skillsMath].sort((a, b) => {
-      const aScore = a.accuracy + (a.attempts < 6 ? 0.15 : 0);
-      const bScore = b.accuracy + (b.attempts < 6 ? 0.15 : 0);
-      if (aScore !== bScore) return aScore - bScore;
-      return b.attempts - a.attempts;
-    });
-    return sorted[0];
-  }, [skillsMath]);
+  const weakest = useMemo(() => {
+    return subjectFocus === "Reading"
+      ? pickWeakest(skillsReading)
+      : pickWeakest(skillsMath);
+  }, [skillsReading, skillsMath, subjectFocus]);
 
-  const weakest = subjectFocus === "Reading" ? weakestReading : weakestMath;
-
-  const practiceHref = useMemo(() => {
+  const nextPracticeHref = useMemo(() => {
     if (weakest?.subskill) {
       return `/practice?subject=${subjectFocus}&subskill=${encodeURIComponent(weakest.subskill)}`;
     }
     return `/practice?subject=${subjectFocus}`;
   }, [weakest, subjectFocus]);
 
-  async function loadAll() {
+  async function load() {
     setLoading(true);
     setErr(null);
 
-    const { data: sessionData } = await supabase.auth.getSession();
-    const session = sessionData.session;
-    if (!session) {
-      router.push("/login");
-      return;
-    }
-
-    const userId = session.user.id;
-
     try {
+      const supabase = getSupabase();
+
+      const { data: sessionData, error: sessErr } = await supabase.auth.getSession();
+      if (sessErr) throw new Error(sessErr.message);
+
+      const session = sessionData.session;
+      if (!session) {
+        router.push("/login");
+        return;
+      }
+
+      const userId = session.user.id;
+
+      // Profile
       const p = await supabase
         .from("profiles")
         .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level")
@@ -147,10 +150,12 @@ export default function TodayPage() {
       if (p.error) throw new Error(p.error.message);
       setProfile(p.data as Profile);
 
+      // Weekly leaderboard
       const lb = await supabase.rpc("get_weekly_leaderboard");
       if (lb.error) throw new Error(lb.error.message);
       setLeaderboard((lb.data ?? []) as LeaderEntry[]);
 
+      // Skills mastery
       const sR = await supabase.rpc("get_skill_mastery", { p_subject: "Reading" });
       if (sR.error) throw new Error(sR.error.message);
       setSkillsReading((sR.data ?? []) as SkillRow[]);
@@ -159,143 +164,128 @@ export default function TodayPage() {
       if (sM.error) throw new Error(sM.error.message);
       setSkillsMath((sM.data ?? []) as SkillRow[]);
 
-      // Pick a sensible default focus:
-      // If profile.weakest_area mentions Reading, focus Reading, else Math.
-      const w = (p.data as Profile)?.weakest_area?.toLowerCase() ?? "";
-      setSubjectFocus(w.includes("read") ? "Reading" : "Math");
+      // Review due count (simple: ask for up to 50 and count)
+      const due = await supabase.rpc("get_due_review_questions", { p_limit: 50 });
+      if (due.error) throw new Error(due.error.message);
+      const dueList = (due.data ?? []) as Question[];
+      setDueReviewCount(dueList.length);
+
     } catch (e: any) {
-      setErr(e?.message || "Unknown error");
+      setErr(e?.message || "Failed to load Today.");
     } finally {
       setLoading(false);
     }
   }
 
   async function logout() {
-    await supabase.auth.signOut();
+    try {
+      const supabase = getSupabase();
+      await supabase.auth.signOut();
+    } catch {}
     router.push("/login");
   }
 
   useEffect(() => {
-    loadAll();
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
     <main className="min-h-screen">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">Today</h1>
-          <p className="text-sm text-gray-600 mt-1">
-            Welcome, <span className="font-medium">{nickname}</span> • {countdownText}
-          </p>
-        </div>
-        <div className="flex gap-3">
-          <button onClick={loadAll} className="text-sm underline text-gray-700">Refresh</button>
-          <button onClick={logout} className="text-sm underline text-gray-700">Logout</button>
-        </div>
-      </div>
+      <PageHeader
+        title="Today"
+        subtitle={`Welcome, ${nickname} • ${countdownText}`}
+        right={
+          <button onClick={logout} className="text-sm font-semibold text-gray-600 hover:text-black underline">
+            Logout
+          </button>
+        }
+      />
 
       {loading && (
-        <div className="mt-6 rounded-2xl border bg-white p-4 text-sm text-gray-600 shadow-sm">
-          Loading…
-        </div>
+        <Card title="Loading…" subtitle="Syncing your dashboard">
+          <div className="text-sm text-gray-600">Please wait.</div>
+        </Card>
       )}
 
-      {err && (
-        <div className="mt-6 rounded-2xl border bg-white p-4 text-sm text-red-600 shadow-sm">
-          {err}
-        </div>
+      {!loading && err && (
+        <Card title="Error" subtitle="Today could not load">
+          <div className="text-sm text-red-600">{err}</div>
+          <div className="mt-4 grid gap-3">
+            <PrimaryButton onClick={load}>Try again</PrimaryButton>
+            <SecondaryButton href="/profile">Profile</SecondaryButton>
+          </div>
+        </Card>
       )}
 
       {!loading && !err && (
-        <div className="mt-6 grid gap-4">
-          {/* Primary CTA */}
-          <div className="rounded-2xl border bg-white p-6 shadow-sm">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-sm font-semibold text-gray-700">Recommended next</div>
-                <div className="mt-1 text-xl font-semibold">
-                  {weakest ? `Fix ${weakest.subskill}` : `Start ${subjectFocus} practice`}
-                </div>
-
-                <div className="mt-2 text-sm text-gray-600">
-                  {weakest ? (
-                    <>
-                      Accuracy {Math.round((weakest.accuracy ?? 0) * 100)}% (n={weakest.attempts}) • Confidence{" "}
-                      {confidenceLabel(weakest.attempts)}
-                    </>
-                  ) : (
-                    <>Do one clean 12-question set to generate useful signals.</>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <div className="flex gap-2">
-                  <button
-                    className={`px-3 py-2 rounded-lg border text-sm ${subjectFocus === "Reading" ? "bg-black text-white" : "bg-white"}`}
-                    onClick={() => setSubjectFocus("Reading")}
-                  >
-                    Reading
-                  </button>
-                  <button
-                    className={`px-3 py-2 rounded-lg border text-sm ${subjectFocus === "Math" ? "bg-black text-white" : "bg-white"}`}
-                    onClick={() => setSubjectFocus("Math")}
-                  >
-                    Math
-                  </button>
-                </div>
-
-                <Link
-                  className="rounded-lg bg-black text-white py-3 px-4 font-medium text-center"
-                  href={practiceHref}
-                >
-                  Practice 12Q
-                </Link>
-              </div>
-            </div>
-          </div>
-
-          {/* Weekly stats */}
-          <div className="rounded-2xl border bg-white p-6 shadow-sm">
-            <div className="text-sm font-semibold text-gray-700">This week</div>
-            <div className="mt-3 grid grid-cols-2 gap-4">
-              <div className="rounded-xl border p-4">
-                <div className="text-xs text-gray-600">Weekly points</div>
-                <div className="text-2xl font-semibold mt-1">{myWeeklyPoints ?? "—"}</div>
-                <div className="text-xs text-gray-500 mt-1">Answered + review, adjusted by accuracy</div>
-              </div>
-              <div className="rounded-xl border p-4">
-                <div className="text-xs text-gray-600">Global rank</div>
-                <div className="text-2xl font-semibold mt-1">{myRank ? `#${myRank}` : "—"}</div>
-                <div className="text-xs text-gray-500 mt-1">Based on weekly points</div>
-              </div>
+        <div className="grid gap-4">
+          {/* 1) Review due */}
+          <Card
+            title="Review due now"
+            subtitle="Spaced repetition — clear what’s scheduled."
+            right={<Pill text={dueReviewCount > 0 ? `${dueReviewCount} due` : "0 due"} />}
+          >
+            <div className="text-sm text-gray-700">
+              {dueReviewCount > 0
+                ? `You have ${dueReviewCount} questions scheduled. Clear them to keep mistakes from sticking.`
+                : "Nothing is due right now. Good. New mistakes will show up here after practice."}
             </div>
 
-            <div className="mt-4 flex gap-3">
-              <Link className="text-sm underline" href="/leagues">Open leagues</Link>
-              <Link className="text-sm underline" href="/skills">Open skills map</Link>
-              <Link className="text-sm underline" href="/profile">Edit profile</Link>
-            </div>
-          </div>
-
-          {/* Quick links */}
-          <div className="rounded-2xl border bg-white p-6 shadow-sm">
-            <div className="text-sm font-semibold text-gray-700">Quick actions</div>
-            <div className="mt-3 grid gap-3">
-              <Link className="rounded-xl border p-4 hover:bg-gray-50" href="/practice?subject=Reading">
-                Start Reading (12Q)
-              </Link>
-              <Link className="rounded-xl border p-4 hover:bg-gray-50" href="/practice?subject=Math">
-                Start Math (12Q)
-              </Link>
-              {weakest && (
-                <Link className="rounded-xl border p-4 hover:bg-gray-50" href={practiceHref}>
-                  Practice weakest now: <span className="font-medium">{weakest.subskill}</span>
-                </Link>
+            <div className="mt-4 grid gap-3">
+              {dueReviewCount > 0 ? (
+                <PrimaryButton href="/review">Start review</PrimaryButton>
+              ) : (
+                <SecondaryButton href="/review">Open review</SecondaryButton>
               )}
             </div>
-          </div>
+          </Card>
+
+          {/* 2) Recommended next */}
+          <Card
+            title="Recommended next"
+            subtitle="Based on your weakest subskill."
+            right={<Pill text={subjectFocus} />}
+          >
+            <div className="text-sm text-gray-700">
+              {weakest ? (
+                <>
+                  Fix <span className="font-semibold">{weakest.subskill}</span> — accuracy{" "}
+                  <span className="font-semibold">{Math.round((weakest.accuracy ?? 0) * 100)}%</span>{" "}
+                  (n={weakest.attempts}) • confidence {confidenceLabel(weakest.attempts)}.
+                </>
+              ) : (
+                "Do one clean 12Q set to generate useful skill signals."
+              )}
+            </div>
+
+            <div className="mt-4 grid gap-3">
+              <PrimaryButton href={nextPracticeHref}>Practice 12Q</PrimaryButton>
+              <SecondaryButton href="/skills">Open skills map</SecondaryButton>
+            </div>
+          </Card>
+
+          {/* 3) This week */}
+          <Card title="This week" subtitle="Your weekly activity snapshot.">
+            <div className="grid grid-cols-2 gap-4">
+              <StatBox
+                label="Weekly points"
+                value={myWeeklyPoints !== null ? String(myWeeklyPoints) : "—"}
+                hint="Practice + review, adjusted by accuracy"
+              />
+              <StatBox
+                label="Global rank"
+                value={myRank ? `#${myRank}` : "—"}
+                hint="Based on weekly points"
+              />
+            </div>
+
+            <div className="mt-4 flex gap-4 text-sm">
+              <Link className="underline text-gray-700 hover:text-black" href="/leagues">Open leagues</Link>
+              <Link className="underline text-gray-700 hover:text-black" href="/practice?subject=Reading">Practice</Link>
+              <Link className="underline text-gray-700 hover:text-black" href="/profile">Edit profile</Link>
+            </div>
+          </Card>
         </div>
       )}
     </main>

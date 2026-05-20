@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
+import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Question = {
   id: string;
@@ -27,6 +28,12 @@ type AnswerInsert = {
   time_taken_seconds: number;
 };
 
+type LocalAnswer = Omit<AnswerInsert, "user_id">;
+
+function clampInt(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
 export default function PracticeClient() {
   const router = useRouter();
   const sp = useSearchParams();
@@ -40,22 +47,42 @@ export default function PracticeClient() {
   const [idx, setIdx] = useState(0);
 
   const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const [selected, setSelected] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
   const [feedback, setFeedback] = useState<{ correct: boolean; correctOption: string } | null>(null);
 
   const [startedAt, setStartedAt] = useState<number>(Date.now());
-  const [answers, setAnswers] = useState<Record<string, Omit<AnswerInsert, "user_id">>>({});
+
+  // answers in state for UI + in ref for race-free saving
+  const [answersState, setAnswersState] = useState<Record<string, LocalAnswer>>({});
+  const answersRef = useRef<Record<string, LocalAnswer>>({});
+
   const [saving, setSaving] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
+
   const [done, setDone] = useState(false);
+  const [dueCount, setDueCount] = useState<number | null>(null);
 
   const q = questions[idx];
   const total = questions.length;
 
-  const correctCount = useMemo(() => Object.values(answers).filter(a => a.is_correct).length, [answers]);
-  const answeredCount = Object.keys(answers).length;
+  const answeredCount = useMemo(() => Object.keys(answersState).length, [answersState]);
+  const correctCount = useMemo(
+    () => Object.values(answersState).filter(a => a.is_correct).length,
+    [answersState]
+  );
+
+  const accuracyPct = useMemo(() => {
+    if (!answeredCount) return 0;
+    return Math.round((correctCount / answeredCount) * 100);
+  }, [answeredCount, correctCount]);
+
+  const headerSubtitle = useMemo(() => {
+    const base = `${subject}${subskill ? ` • ${subskill}` : ""} • ${limit}Q`;
+    return base;
+  }, [subject, subskill, limit]);
 
   function optionText(letter: string) {
     if (!q) return "";
@@ -69,13 +96,23 @@ export default function PracticeClient() {
   }
 
   function pick(letter: string) {
-    if (locked) return;
+    if (locked || saving) return;
     setSelected(letter);
+  }
+
+  function resetQuestionUI() {
+    setSelected(null);
+    setLocked(false);
+    setFeedback(null);
+    setStartedAt(Date.now());
   }
 
   async function ensureAuthAndLoad() {
     setLoading(true);
-    setErr(null);
+    setLoadErr(null);
+    setSaveErr(null);
+    setDone(false);
+    setDueCount(null);
 
     try {
       const supabase = getSupabase();
@@ -104,14 +141,13 @@ export default function PracticeClient() {
 
       setQuestions(list);
       setIdx(0);
-      setSelected(null);
-      setLocked(false);
-      setFeedback(null);
-      setAnswers({});
-      setStartedAt(Date.now());
-      setDone(false);
+
+      answersRef.current = {};
+      setAnswersState({});
+      resetQuestionUI();
+
     } catch (e: any) {
-      setErr(e?.message || "Failed to load practice.");
+      setLoadErr(e?.message || "Failed to load practice.");
       setQuestions([]);
     } finally {
       setLoading(false);
@@ -123,25 +159,32 @@ export default function PracticeClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subject, subskill]);
 
-  async function submit() {
-    if (!q || !selected) return;
+  function recordAnswer(question: Question, chosen: string) {
+    const timeTaken = clampInt(Math.round((Date.now() - startedAt) / 1000), 0, 60 * 60);
+    const selectedOpt = chosen.toUpperCase();
+    const correctOpt = question.correct_option.toUpperCase();
+    const isCorrect = selectedOpt === correctOpt;
 
-    const timeTaken = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-    const isCorrect = selected.toUpperCase() === q.correct_option.toUpperCase();
+    const entry: LocalAnswer = {
+      question_id: question.id,
+      selected_option: selectedOpt,
+      is_correct: isCorrect,
+      is_review: false,
+      time_taken_seconds: timeTaken,
+    };
 
-    setAnswers(prev => ({
-      ...prev,
-      [q.id]: {
-        question_id: q.id,
-        selected_option: selected.toUpperCase(),
-        is_correct: isCorrect,
-        is_review: false,
-        time_taken_seconds: timeTaken,
-      }
-    }));
+    // update ref synchronously (race-free)
+    answersRef.current = { ...answersRef.current, [question.id]: entry };
+    // update state for UI
+    setAnswersState(prev => ({ ...prev, [question.id]: entry }));
 
-    setFeedback({ correct: isCorrect, correctOption: q.correct_option.toUpperCase() });
+    setFeedback({ correct: isCorrect, correctOption: correctOpt });
     setLocked(true);
+  }
+
+  async function submit() {
+    if (!q || !selected || locked) return;
+    recordAnswer(q, selected);
   }
 
   async function nextOrFinish() {
@@ -154,18 +197,27 @@ export default function PracticeClient() {
     }
 
     setIdx(i => i + 1);
-    setSelected(null);
-    setLocked(false);
-    setFeedback(null);
-    setStartedAt(Date.now());
+    resetQuestionUI();
+  }
+
+  async function fetchDueCount() {
+    try {
+      const supabase = getSupabase();
+      const due = await supabase.rpc("get_due_review_questions", { p_limit: 50 });
+      if (due.error) return null;
+      const list = (due.data ?? []) as Array<{ id: string }>;
+      return list.length;
+    } catch {
+      return null;
+    }
   }
 
   async function finishSession() {
     setSaving(true);
-    setErr(null);
+    setSaveErr(null);
 
     try {
-      const rows = Object.values(answers);
+      const rows = Object.values(answersRef.current);
       if (!rows.length) throw new Error("No answers to save.");
       if (!userId) throw new Error("Missing user session.");
 
@@ -175,62 +227,98 @@ export default function PracticeClient() {
       const { error } = await supabase.from("user_responses").insert(payload);
       if (error) throw new Error(error.message);
 
+      // optionally refresh due review count for a better CTA
+      const due = await fetchDueCount();
+      setDueCount(due);
+
       setDone(true);
     } catch (e: any) {
-      setErr(e?.message || "Failed to save session.");
+      setSaveErr(e?.message || "Failed to save session.");
     } finally {
       setSaving(false);
     }
   }
 
+  async function retrySave() {
+    await finishSession();
+  }
+
+  function exitToToday() {
+    router.push("/today");
+  }
+
   return (
-    <main className="min-h-screen p-6 max-w-3xl mx-auto">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">Practice</h1>
-          <p className="text-sm text-gray-600 mt-1">
-            {subject}{subskill ? ` • ${subskill}` : ""} • {limit} questions
-          </p>
-        </div>
-        <button className="text-sm underline text-gray-700" onClick={() => router.push("/today")}>
-          Back
-        </button>
-      </div>
+    <main className="min-h-screen">
+      <PageHeader
+        title="Practice"
+        subtitle={headerSubtitle}
+        right={
+          <button
+            onClick={exitToToday}
+            className="text-sm font-semibold text-gray-600 hover:text-black underline"
+          >
+            Exit
+          </button>
+        }
+      />
 
-      <div className="mt-6 rounded-2xl border bg-white shadow-sm">
-        <div className="p-4 border-b flex items-center justify-between">
-          <div className="text-sm text-gray-600">
-            Question {Math.min(idx + 1, total)} / {total}
-          </div>
-          <div className="text-sm font-medium">
-            Accuracy: {answeredCount ? Math.round((correctCount / answeredCount) * 100) : 0}%
-          </div>
-        </div>
+      <Card
+        title={`Question ${Math.min(idx + 1, Math.max(total, 1))} / ${Math.max(total, 1)}`}
+        subtitle={done ? "Session summary" : "Answer, then continue."}
+        right={<Pill text={`Accuracy ${accuracyPct}%`} />}
+      >
+        {loading && <div className="text-sm text-gray-600">Loading questions…</div>}
 
-        {loading && <div className="p-4 text-sm text-gray-600">Loading questions…</div>}
-        {err && <div className="p-4 text-sm text-red-600">{err}</div>}
-
-        {!loading && !err && done && (
-          <div className="p-6">
-            <div className="text-xl font-semibold">Session complete</div>
-            <div className="mt-2 text-sm text-gray-700">
-              Score: <span className="font-semibold">{correctCount}</span> / {total} (
-              {total ? Math.round((correctCount / total) * 100) : 0}%)
-            </div>
-
-            <div className="mt-6 grid grid-cols-2 gap-3">
-              <button className="rounded-lg bg-black text-white py-3 font-medium" onClick={() => ensureAuthAndLoad()}>
-                Practice again
-              </button>
-              <button className="rounded-lg border py-3 font-medium" onClick={() => router.push("/leagues")}>
-                Go to leagues
-              </button>
+        {!loading && loadErr && (
+          <div className="text-sm text-red-600">
+            {loadErr}
+            <div className="mt-4 grid gap-3">
+              <PrimaryButton onClick={ensureAuthAndLoad}>Try again</PrimaryButton>
+              <SecondaryButton href="/today">Back to Today</SecondaryButton>
             </div>
           </div>
         )}
 
-        {!loading && !err && !done && q && (
-          <div className="p-6">
+        {!loading && !loadErr && done && (
+          <div>
+            <div className="grid grid-cols-2 gap-4">
+              <StatBox label="Score" value={`${correctCount}/${total}`} hint="Correct / total" />
+              <StatBox label="Accuracy" value={`${total ? Math.round((correctCount / total) * 100) : 0}%`} hint="This session" />
+            </div>
+
+            <div className="mt-4 text-sm text-gray-700">
+              {dueCount !== null
+                ? (dueCount > 0
+                    ? `You now have ${dueCount} review questions due. Clearing them keeps mistakes from sticking.`
+                    : "No review due right now. Good. Keep practicing.")
+                : "Next step: do review (if due) or run another clean 12Q set."}
+            </div>
+
+            {saveErr && (
+              <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                Save failed: {saveErr}
+                <div className="mt-3 grid gap-2">
+                  <PrimaryButton onClick={retrySave} disabled={saving}>
+                    {saving ? "Retrying…" : "Retry save"}
+                  </PrimaryButton>
+                </div>
+              </div>
+            )}
+
+            <div className="mt-5 grid gap-3">
+              {dueCount !== null && dueCount > 0 ? (
+                <PrimaryButton href="/review">Go to Review</PrimaryButton>
+              ) : (
+                <PrimaryButton href={`/practice?subject=${encodeURIComponent(subject)}`}>Practice another 12Q</PrimaryButton>
+              )}
+              <SecondaryButton onClick={ensureAuthAndLoad}>New set (reload)</SecondaryButton>
+              <SecondaryButton href="/today">Back to Today</SecondaryButton>
+            </div>
+          </div>
+        )}
+
+        {!loading && !loadErr && !done && q && (
+          <div>
             <div className="text-base font-medium leading-relaxed whitespace-pre-line">
               {q.question_text}
             </div>
@@ -241,10 +329,10 @@ export default function PracticeClient() {
                 const correct = locked && q.correct_option.toUpperCase() === letter;
                 const wrongChosen = locked && chosen && !correct;
 
-                let cls = "border";
-                if (chosen) cls = "border-black";
-                if (correct) cls = "border-green-600 bg-green-50";
-                if (wrongChosen) cls = "border-red-600 bg-red-50";
+                let cls = "border border-gray-200";
+                if (chosen) cls = "border border-black";
+                if (correct) cls = "border border-green-600 bg-green-50";
+                if (wrongChosen) cls = "border border-red-600 bg-red-50";
 
                 return (
                   <button
@@ -253,8 +341,8 @@ export default function PracticeClient() {
                     className={`w-full text-left rounded-xl p-4 ${cls}`}
                     disabled={saving}
                   >
-                    <div className="text-sm font-semibold mb-1">{letter}</div>
-                    <div className="text-sm text-gray-800">{optionText(letter)}</div>
+                    <div className="text-xs font-semibold text-gray-500 mb-1">{letter}</div>
+                    <div className="text-sm text-gray-900">{optionText(letter)}</div>
                   </button>
                 );
               })}
@@ -263,7 +351,7 @@ export default function PracticeClient() {
             <div className="mt-6 flex gap-3 items-start">
               {!locked ? (
                 <button
-                  className="rounded-lg bg-black text-white py-3 px-4 font-medium disabled:opacity-60"
+                  className="rounded-xl bg-black text-white py-3 px-4 text-sm font-semibold disabled:opacity-60"
                   onClick={submit}
                   disabled={!selected || saving}
                 >
@@ -271,7 +359,7 @@ export default function PracticeClient() {
                 </button>
               ) : (
                 <button
-                  className="rounded-lg bg-black text-white py-3 px-4 font-medium disabled:opacity-60"
+                  className="rounded-xl bg-black text-white py-3 px-4 text-sm font-semibold disabled:opacity-60"
                   onClick={nextOrFinish}
                   disabled={saving}
                 >
@@ -280,7 +368,7 @@ export default function PracticeClient() {
               )}
 
               {locked && feedback && (
-                <div className="flex-1 rounded-xl border p-4">
+                <div className="flex-1 rounded-xl border border-gray-200 p-4">
                   <div className={`font-semibold ${feedback.correct ? "text-green-700" : "text-red-700"}`}>
                     {feedback.correct ? "Correct" : "Incorrect"}
                   </div>
@@ -298,18 +386,29 @@ export default function PracticeClient() {
                     </div>
                   ) : (
                     <div className="mt-3 text-sm text-gray-600">
-                      No explanation available for this question.
+                      No explanation available yet.
                     </div>
                   )}
                 </div>
               )}
             </div>
+
+            {saveErr && (
+              <div className="mt-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                Save error: {saveErr}
+                <div className="mt-3 grid gap-2">
+                  <PrimaryButton onClick={retrySave} disabled={saving}>
+                    {saving ? "Retrying…" : "Retry save"}
+                  </PrimaryButton>
+                </div>
+              </div>
+            )}
           </div>
         )}
-      </div>
+      </Card>
 
       <div className="mt-6 text-xs text-gray-500">
-        MVP note: answers are saved at the end of the session.
+        Notes: This is session-based saving (batched at the end). If saving fails, use “Retry save”.
       </div>
     </main>
   );

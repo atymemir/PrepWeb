@@ -1,11 +1,10 @@
 'use client';
 export const dynamic = 'force-dynamic';
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getSupabase } from "@/app/lib/supabase";
-
-export default function ProfilePage() {
+import { getSupabase } from "../lib/supabase";
+import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Profile = {
   id: string;
@@ -14,12 +13,11 @@ type Profile = {
   daily_study_hours: number | null;
   weakest_area: string | null;
   current_level: string | null;
-  exam_date: string | null; // timestamptz from supabase
+  exam_date: string | null;
 };
 
 function isoToDateInput(iso: string | null): string {
   if (!iso) return "";
-  // Handles both "2026-05-20T..." and "2026-05-20"
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "";
   const yyyy = d.getFullYear();
@@ -34,11 +32,29 @@ function dateInputToISO(dateStr: string): string | null {
   return new Date(`${dateStr}T00:00:00.000Z`).toISOString();
 }
 
-  const supabase = getSupabase();
+function daysUntil(iso: string | null): number | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const end = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  return Math.round((end - start) / (1000 * 60 * 60 * 24));
+}
+
+function clampNumberString(v: string, min: number, max: number, fallback: number) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+export default function ProfilePage() {
   const router = useRouter();
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -50,10 +66,26 @@ function dateInputToISO(dateStr: string): string | null {
   const [dailyHours, setDailyHours] = useState("2");
   const [examDate, setExamDate] = useState(""); // YYYY-MM-DD
 
-  async function ensureAuth() {
-    const { data } = await supabase.auth.getSession();
-    if (!data.session) router.push("/login");
-    return data.session?.user.id ?? null;
+  const daysLeft = useMemo(() => daysUntil(profile?.exam_date ?? null), [profile]);
+  const countdownText = useMemo(() => {
+    if (daysLeft === null) return "Set SAT date";
+    if (daysLeft < 0) return "Update date";
+    if (daysLeft === 0) return "SAT today";
+    if (daysLeft === 1) return "1 day left";
+    return `${daysLeft} days left`;
+  }, [daysLeft]);
+
+  const displayName = useMemo(() => nickname.trim() || profile?.nickname?.trim() || "Student", [nickname, profile]);
+
+  async function ensureAuth(): Promise<string | null> {
+    const supabase = getSupabase();
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw new Error(error.message);
+    if (!data.session) {
+      router.push("/login");
+      return null;
+    }
+    return data.session.user.id;
   }
 
   async function loadProfile() {
@@ -61,28 +93,31 @@ function dateInputToISO(dateStr: string): string | null {
     setErr(null);
     setMsg(null);
 
-    const userId = await ensureAuth();
-    if (!userId) return;
+    try {
+      const userId = await ensureAuth();
+      if (!userId) return;
 
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("id,nickname,target_score,daily_study_hours,weakest_area,current_level,exam_date")
-      .eq("id", userId)
-      .single();
+      const supabase = getSupabase();
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("id,nickname,target_score,daily_study_hours,weakest_area,current_level,exam_date")
+        .eq("id", userId)
+        .single();
 
-    setLoading(false);
+      if (error) throw new Error(error.message);
 
-    if (error) {
-      setErr(error.message);
-      return;
+      const p = data as Profile;
+      setProfile(p);
+
+      setNickname(p.nickname ?? "");
+      setTargetScore(String(p.target_score ?? 1400));
+      setDailyHours(String(p.daily_study_hours ?? 2));
+      setExamDate(isoToDateInput(p.exam_date));
+    } catch (e: any) {
+      setErr(e?.message || "Failed to load profile.");
+    } finally {
+      setLoading(false);
     }
-
-    const p = data as Profile;
-    setProfile(p);
-    setNickname(p.nickname ?? "");
-    setTargetScore(String(p.target_score ?? 1400));
-    setDailyHours(String(p.daily_study_hours ?? 2));
-    setExamDate(isoToDateInput(p.exam_date));
   }
 
   async function save() {
@@ -92,31 +127,36 @@ function dateInputToISO(dateStr: string): string | null {
     setErr(null);
     setMsg(null);
 
-    const payload: Partial<Profile> = {
-      nickname: nickname.trim() || null,
-      target_score: Number.isFinite(Number(targetScore)) ? Number(targetScore) : 1400,
-      daily_study_hours: Number.isFinite(Number(dailyHours)) ? Number(dailyHours) : 2,
-      exam_date: dateInputToISO(examDate),
-    };
+    try {
+      const payload: Partial<Profile> = {
+        nickname: nickname.trim() || null,
+        target_score: clampNumberString(targetScore, 800, 1600, 1400),
+        daily_study_hours: clampNumberString(dailyHours, 0, 12, 2),
+        exam_date: dateInputToISO(examDate),
+      };
 
-    const { error } = await supabase
-      .from("profiles")
-      .update(payload)
-      .eq("id", profile.id);
+      const supabase = getSupabase();
+      const { error } = await supabase
+        .from("profiles")
+        .update(payload)
+        .eq("id", profile.id);
 
-    setSaving(false);
+      if (error) throw new Error(error.message);
 
-    if (error) {
-      setErr(error.message);
-      return;
+      setMsg("Saved.");
+      await loadProfile();
+    } catch (e: any) {
+      setErr(e?.message || "Save failed.");
+    } finally {
+      setSaving(false);
     }
-
-    setMsg("Saved.");
-    await loadProfile();
   }
 
   async function logout() {
-    await supabase.auth.signOut();
+    try {
+      const supabase = getSupabase();
+      await supabase.auth.signOut();
+    } catch {}
     router.push("/login");
   }
 
@@ -127,27 +167,52 @@ function dateInputToISO(dateStr: string): string | null {
 
   return (
     <main className="min-h-screen">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">Profile</h1>
-          <p className="text-sm text-gray-600 mt-1">Personalize your plan.</p>
-        </div>
-        <button onClick={logout} className="text-sm underline text-gray-700">
-          Logout
-        </button>
-      </div>
+      <PageHeader
+        title="Profile"
+        subtitle="Personalize your plan. Keep it honest and simple."
+        right={
+          <button onClick={logout} className="text-sm font-semibold text-gray-600 hover:text-black underline">
+            Logout
+          </button>
+        }
+      />
 
-      <div className="mt-6 rounded-2xl border bg-white shadow-sm">
-        {loading && <div className="p-4 text-sm text-gray-600">Loading…</div>}
-        {err && <div className="p-4 text-sm text-red-600">{err}</div>}
-        {msg && <div className="p-4 text-sm text-green-700">{msg}</div>}
+      <Card
+        title="Your plan"
+        subtitle="These settings drive your Today dashboard and urgency."
+        right={<Pill text={countdownText} />}
+      >
+        {loading && <div className="text-sm text-gray-600">Loading…</div>}
+
+        {!loading && err && (
+          <div>
+            <div className="text-sm text-red-600">{err}</div>
+            <div className="mt-4 grid gap-3">
+              <PrimaryButton onClick={loadProfile}>Try again</PrimaryButton>
+              <SecondaryButton href="/today">Back to Today</SecondaryButton>
+            </div>
+          </div>
+        )}
 
         {!loading && !err && (
-          <div className="p-6 space-y-5">
+          <div className="grid gap-4">
+            {msg && (
+              <div className="rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700">
+                {msg}
+              </div>
+            )}
+
+            {/* Quick summary row */}
+            <div className="grid grid-cols-2 gap-4">
+              <StatBox label="Name" value={displayName} hint="Shown on leagues" />
+              <StatBox label="Target" value={`${clampNumberString(targetScore, 800, 1600, 1400)}`} hint="Goal (not prediction)" />
+            </div>
+
+            {/* Form */}
             <div>
-              <label className="text-sm font-medium">Nickname</label>
+              <label className="text-sm font-semibold text-gray-700">Nickname</label>
               <input
-                className="mt-2 w-full rounded-lg border p-3"
+                className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none focus:border-black"
                 placeholder="Student"
                 value={nickname}
                 onChange={(e) => setNickname(e.target.value)}
@@ -156,48 +221,53 @@ function dateInputToISO(dateStr: string): string | null {
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="text-sm font-medium">Target score</label>
+                <label className="text-sm font-semibold text-gray-700">Target score</label>
                 <input
-                  className="mt-2 w-full rounded-lg border p-3"
+                  className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none focus:border-black"
                   value={targetScore}
                   onChange={(e) => setTargetScore(e.target.value)}
                   inputMode="numeric"
                 />
+                <div className="mt-2 text-xs text-gray-500">800–1600. This is a goal, not a prediction.</div>
               </div>
               <div>
-                <label className="text-sm font-medium">Study hours/day</label>
+                <label className="text-sm font-semibold text-gray-700">Study hours/day</label>
                 <input
-                  className="mt-2 w-full rounded-lg border p-3"
+                  className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none focus:border-black"
                   value={dailyHours}
                   onChange={(e) => setDailyHours(e.target.value)}
                   inputMode="numeric"
                 />
+                <div className="mt-2 text-xs text-gray-500">0–12 hours. Keep it realistic.</div>
               </div>
             </div>
 
             <div>
-              <label className="text-sm font-medium">SAT date</label>
+              <label className="text-sm font-semibold text-gray-700">SAT date</label>
               <input
-                className="mt-2 w-full rounded-lg border p-3"
+                className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none focus:border-black"
                 type="date"
                 value={examDate}
                 onChange={(e) => setExamDate(e.target.value)}
               />
-              <div className="text-xs text-gray-500 mt-2">
-                Used for countdown and urgency.
-              </div>
+              <div className="mt-2 text-xs text-gray-500">Used for countdown and urgency.</div>
             </div>
 
-            <button
-              onClick={save}
-              disabled={saving}
-              className="w-full rounded-lg bg-black text-white py-3 font-medium disabled:opacity-60"
-            >
-              {saving ? "Saving…" : "Save changes"}
-            </button>
+            <div className="grid gap-3">
+              <PrimaryButton onClick={save} disabled={saving}>
+                {saving ? "Saving…" : "Save changes"}
+              </PrimaryButton>
+              <SecondaryButton href="/today">Back to Today</SecondaryButton>
+            </div>
+
+            <div className="flex gap-4 text-sm">
+              <a className="underline text-gray-700 hover:text-black" href="/skills">Skills</a>
+              <a className="underline text-gray-700 hover:text-black" href="/leagues">Leagues</a>
+              <a className="underline text-gray-700 hover:text-black" href="/review">Review</a>
+            </div>
           </div>
         )}
-      </div>
+      </Card>
     </main>
   );
 }

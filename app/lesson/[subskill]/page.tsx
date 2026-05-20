@@ -1,80 +1,63 @@
-'use client';
-export const dynamic = 'force-dynamic';
+import { notFound } from "next/navigation";
+import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../../ui/ui";
+import { LESSONS } from "../../data/lessons";
 
-import { useMemo } from 'react';
-import { useParams } from 'next/navigation';
-import { LESSONS } from '@/app/data/lessons';
-import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton } from '@/app/ui/ui';
+export default function LessonPage({ params }: { params: { subskill: string } }) {
+  const lesson = LESSONS.find((lesson) => lesson.key === params.subskill);
 
-export default function LessonPage() {
-  const params = useParams<{ subskill: string }>();
-  const subskill = decodeURIComponent(params.subskill);
-
-  const lesson = useMemo(() => {
-    return LESSONS.find((l) => l.key.toLowerCase() === subskill.toLowerCase()) || null;
-  }, [subskill]);
+  if (!lesson) {
+    notFound();
+  }
 
   return (
     <main className="min-h-screen">
-      <PageHeader title={subskill} subtitle="Lesson notes + traps + mini example" />
+      <PageHeader
+        title={lesson.title}
+        subtitle={lesson.summary}
+        right={<Pill text={lesson.key} />}
+      />
 
-      {!lesson ? (
-        <Card title="Lesson not available yet" subtitle="This topic doesn’t have written notes yet.">
-          <div className="text-sm text-gray-700">
-            You can still practice the topic now. Later we’ll add notes here.
-          </div>
-          <div className="mt-5 grid gap-3">
-            <PrimaryButton href={`/practice?subject=Reading&subskill=${encodeURIComponent(subskill)}`}>
-              Practice this (12Q)
-            </PrimaryButton>
-            <SecondaryButton href="/skills">Back to skills</SecondaryButton>
+      <div className="space-y-6">
+        <Card title="Key points">
+          <ul className="space-y-3 text-sm text-gray-700">
+            {lesson.keyPoints.map((point, index) => (
+              <li key={index} className="list-disc pl-5">
+                {point}
+              </li>
+            ))}
+          </ul>
+        </Card>
+
+        <Card title="Common traps">
+          <ul className="space-y-3 text-sm text-gray-700">
+            {lesson.commonTraps.map((trap, index) => (
+              <li key={index} className="list-disc pl-5">
+                {trap}
+              </li>
+            ))}
+          </ul>
+        </Card>
+
+        <Card title="Mini example">
+          <div className="space-y-3 text-sm text-gray-700">
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
+              <div className="font-semibold text-black">Prompt</div>
+              <div className="mt-2 whitespace-pre-wrap">{lesson.miniExample.prompt}</div>
+            </div>
+            <div className="rounded-2xl border border-gray-200 bg-white p-4">
+              <div className="font-semibold text-black">Answer</div>
+              <div className="mt-2 whitespace-pre-wrap">{lesson.miniExample.answer}</div>
+            </div>
           </div>
         </Card>
-      ) : (
-        <div className="grid gap-4">
-          <Card title="Summary" subtitle={lesson.title}>
-            <div className="text-sm text-gray-800 leading-relaxed">{lesson.summary}</div>
-            <div className="mt-4 flex gap-2 flex-wrap">
-              <Pill text="Short" />
-              <Pill text="Practical" />
-              <Pill text="SAT-style" />
-            </div>
-          </Card>
 
-          <Card title="Key points">
-            <ul className="list-disc pl-5 text-sm text-gray-800 space-y-2">
-              {lesson.keyPoints.map((p, i) => (
-                <li key={i}>{p}</li>
-              ))}
-            </ul>
-          </Card>
-
-          <Card title="Common traps">
-            <ul className="list-disc pl-5 text-sm text-gray-800 space-y-2">
-              {lesson.commonTraps.map((t, i) => (
-                <li key={i}>{t}</li>
-              ))}
-            </ul>
-          </Card>
-
-          <Card title="Mini example">
-            <div className="text-sm text-gray-800">
-              <div className="font-semibold">Prompt</div>
-              <div className="mt-1 text-gray-700">{lesson.miniExample.prompt}</div>
-
-              <div className="mt-4 font-semibold">Answer</div>
-              <div className="mt-1 text-gray-700">{lesson.miniExample.answer}</div>
-            </div>
-
-            <div className="mt-5 grid gap-3">
-              <PrimaryButton href={`/practice?subject=Reading&subskill=${encodeURIComponent(subskill)}`}>
-                Practice this (12Q)
-              </PrimaryButton>
-              <SecondaryButton href="/skills">Back to skills</SecondaryButton>
-            </div>
-          </Card>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <PrimaryButton href={`/practice?subskill=${encodeURIComponent(lesson.key)}`}>
+            Practice this subskill
+          </PrimaryButton>
+          <SecondaryButton href="/skills">Back to Skills</SecondaryButton>
         </div>
-      )}
+      </div>
     </main>
   );
 }
