@@ -1,20 +1,89 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-/* Monochrome premium tokens */
 :root {
-  --bg: 255 255 255;
-  --fg: 10 10 10;
-  --muted: 107 114 128;   /* gray-500 */
-  --border: 229 231 235;  /* gray-200 */
-  --border2: 209 213 219; /* gray-300 */
-}
-
-html, body {
-  height: 100%;
-  background: rgb(var(--bg));
-  color: rgb(var(--fg));
+  --bg: #ffffff;
+  --fg: #0a0a0a;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+  --card: #ffffff;
 }
 
 * { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+a { color: inherit; text-decoration: none; }
+button { font: inherit; }
+
+.container {
+  max-width: 56rem;
+  margin: 0 auto;
+  padding: 1.25rem;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--card);
+}
+
+.cardHeader {
+  padding: 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.cardBody { padding: 1.25rem; }
+
+.h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.01em; }
+.subtle { color: var(--muted); font-size: 0.875rem; }
+
+.btnPrimary {
+  background: #0a0a0a;
+  color: white;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  font-weight: 600;
+  border: 1px solid #0a0a0a;
+}
+.btnPrimary:hover { opacity: 0.92; }
+
+.btnSecondary {
+  background: white;
+  color: #0a0a0a;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  font-weight: 600;
+  border: 1px solid var(--border-strong);
+}
+.btnSecondary:hover { background: #fafafa; }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: .35rem .6rem;
+  font-size: .75rem;
+  color: var(--muted);
+}
+
+.input {
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  outline: none;
+}
+.input:focus { border-color: #111827; }
+:root{
+  --bg: 255 255 255;
+  --fg: 10 10 10;
+  --muted: 107 114 128;
+  --border: 229 231 235;
+}
+
+html, body { background: rgb(var(--bg)); color: rgb(var(--fg)); }
