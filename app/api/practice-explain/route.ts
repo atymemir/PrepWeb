@@ -98,10 +98,14 @@ Return strict JSON:
     });
 
     const response = await client.responses.create({
-      model: "gpt-5.5",
+      model: "gpt-5.4-mini",
       instructions: systemPrompt,
       input: JSON.stringify(body),
+      reasoning: {
+        effort: "low",
+      },
       text: {
+        verbosity: "low",
         format: {
           type: "json_schema",
           name: "practice_explanation",
