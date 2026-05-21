@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
-import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Profile = {
   id: string;
@@ -23,7 +23,7 @@ type LeaderEntry = {
   answered: number;
   correct: number;
   review_answered: number;
-  accuracy: number; // 0..1
+  accuracy: number;
   points: number;
 };
 
@@ -33,7 +33,7 @@ type SkillRow = {
   subskill: string;
   attempts: number;
   correct: number;
-  accuracy: number; // 0..1
+  accuracy: number;
 };
 
 type Question = {
@@ -57,11 +57,15 @@ function confidenceLabel(n: number): "Low" | "Medium" | "High" {
   return "High";
 }
 
+function scoreWeakness(row: SkillRow): number {
+  return (row.accuracy ?? 0) + (row.attempts < 6 ? 0.12 : 0);
+}
+
 function pickWeakest(rows: SkillRow[]): SkillRow | null {
   if (!rows.length) return null;
   const sorted = [...rows].sort((a, b) => {
-    const aScore = (a.accuracy ?? 0) + (a.attempts < 6 ? 0.15 : 0);
-    const bScore = (b.accuracy ?? 0) + (b.attempts < 6 ? 0.15 : 0);
+    const aScore = scoreWeakness(a);
+    const bScore = scoreWeakness(b);
     if (aScore !== bScore) return aScore - bScore;
     return b.attempts - a.attempts;
   });
@@ -93,34 +97,85 @@ export default function TodayPage() {
 
   const myRank = useMemo(() => {
     if (!profile) return null;
-    const idx = leaderboard.findIndex(e => e.user_id === profile.id);
-    if (idx === -1) return null;
-    return idx + 1;
+    const idx = leaderboard.findIndex((e) => e.user_id === profile.id);
+    return idx === -1 ? null : idx + 1;
   }, [leaderboard, profile]);
 
   const myWeeklyPoints = useMemo(() => {
     if (!profile) return null;
-    const me = leaderboard.find(e => e.user_id === profile.id);
+    const me = leaderboard.find((e) => e.user_id === profile.id);
     return me ? Math.round(me.points) : null;
   }, [leaderboard, profile]);
 
-  const subjectFocus = useMemo<"Reading" | "Math">(() => {
-    const w = (profile?.weakest_area ?? "").toLowerCase();
-    return w.includes("read") ? "Reading" : "Math";
-  }, [profile]);
+  const weakestReading = useMemo(() => pickWeakest(skillsReading), [skillsReading]);
+  const weakestMath = useMemo(() => pickWeakest(skillsMath), [skillsMath]);
 
-  const weakest = useMemo(() => {
-    return subjectFocus === "Reading"
-      ? pickWeakest(skillsReading)
-      : pickWeakest(skillsMath);
-  }, [skillsReading, skillsMath, subjectFocus]);
+  const weakestOverall = useMemo(() => {
+    if (!weakestReading && !weakestMath) return null;
+    if (!weakestReading) return { subject: "Math" as const, row: weakestMath! };
+    if (!weakestMath) return { subject: "Reading" as const, row: weakestReading };
 
-  const nextPracticeHref = useMemo(() => {
-    if (weakest?.subskill) {
-      return `/practice?subject=${subjectFocus}&subskill=${encodeURIComponent(weakest.subskill)}`;
+    const rScore = scoreWeakness(weakestReading);
+    const mScore = scoreWeakness(weakestMath);
+
+    return rScore <= mScore
+      ? { subject: "Reading" as const, row: weakestReading }
+      : { subject: "Math" as const, row: weakestMath };
+  }, [weakestReading, weakestMath]);
+
+  const weakestHref = useMemo(() => {
+    if (!weakestOverall?.row?.subskill) return "/practice?subject=Reading";
+    return `/practice?subject=${weakestOverall.subject}&subskill=${encodeURIComponent(
+      weakestOverall.row.subskill
+    )}`;
+  }, [weakestOverall]);
+
+  const weakestLessonHref = useMemo(() => {
+    if (!weakestOverall?.row?.subskill) return "/lessons";
+    return `/lesson/${encodeURIComponent(weakestOverall.row.subskill)}`;
+  }, [weakestOverall]);
+
+  const priority = useMemo(() => {
+    if (dueReviewCount > 0) {
+      return {
+        title: "Clear review first",
+        reason:
+          dueReviewCount === 1
+            ? "You have 1 recovery item due. Review should come before more forward practice."
+            : `You have ${dueReviewCount} recovery items due. Clear them before more forward practice.`,
+        ctaHref: "/review",
+        ctaLabel: "Start review",
+        secondaryHref: weakestHref,
+        secondaryLabel: "Skip to practice",
+        pill: `${dueReviewCount} due`,
+      };
     }
-    return `/practice?subject=${subjectFocus}`;
-  }, [weakest, subjectFocus]);
+
+    if (weakestOverall?.row) {
+      return {
+        title: `Fix ${weakestOverall.row.subskill}`,
+        reason: `Current weakest signal: ${Math.round(
+          (weakestOverall.row.accuracy ?? 0) * 100
+        )}% accuracy over ${weakestOverall.row.attempts} attempts in ${weakestOverall.subject}.`,
+        ctaHref: weakestHref,
+        ctaLabel: "Practice weakest",
+        secondaryHref: weakestLessonHref,
+        secondaryLabel: "Open lesson",
+        pill: weakestOverall.subject,
+      };
+    }
+
+    return {
+      title: "Generate a clean signal",
+      reason:
+        "You need a little more data before weak-zone ranking becomes trustworthy. Run one focused set first.",
+      ctaHref: "/practice?subject=Reading",
+      ctaLabel: "Start practice",
+      secondaryHref: "/skills",
+      secondaryLabel: "Open skills",
+      pill: "Fresh start",
+    };
+  }, [dueReviewCount, weakestOverall, weakestHref, weakestLessonHref]);
 
   async function load() {
     setLoading(true);
@@ -140,7 +195,6 @@ export default function TodayPage() {
 
       const userId = session.user.id;
 
-      // Profile
       const p = await supabase
         .from("profiles")
         .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level")
@@ -150,12 +204,10 @@ export default function TodayPage() {
       if (p.error) throw new Error(p.error.message);
       setProfile(p.data as Profile);
 
-      // Weekly leaderboard
       const lb = await supabase.rpc("get_weekly_leaderboard");
       if (lb.error) throw new Error(lb.error.message);
       setLeaderboard((lb.data ?? []) as LeaderEntry[]);
 
-      // Skills mastery
       const sR = await supabase.rpc("get_skill_mastery", { p_subject: "Reading" });
       if (sR.error) throw new Error(sR.error.message);
       setSkillsReading((sR.data ?? []) as SkillRow[]);
@@ -164,12 +216,9 @@ export default function TodayPage() {
       if (sM.error) throw new Error(sM.error.message);
       setSkillsMath((sM.data ?? []) as SkillRow[]);
 
-      // Review due count (simple: ask for up to 50 and count)
       const due = await supabase.rpc("get_due_review_questions", { p_limit: 50 });
       if (due.error) throw new Error(due.error.message);
-      const dueList = (due.data ?? []) as Question[];
-      setDueReviewCount(dueList.length);
-
+      setDueReviewCount(((due.data ?? []) as Question[]).length);
     } catch (e: any) {
       setErr(e?.message || "Failed to load Today.");
     } finally {
@@ -196,14 +245,17 @@ export default function TodayPage() {
         title="Today"
         subtitle={`Welcome, ${nickname} • ${countdownText}`}
         right={
-          <button onClick={logout} className="text-sm font-semibold text-gray-600 hover:text-black underline">
+          <button
+            onClick={logout}
+            className="text-sm font-semibold text-gray-600 hover:text-black underline"
+          >
             Logout
           </button>
         }
       />
 
       {loading && (
-        <Card title="Loading…" subtitle="Syncing your dashboard">
+        <Card title="Loading…" subtitle="Syncing your command center">
           <div className="text-sm text-gray-600">Please wait.</div>
         </Card>
       )}
@@ -220,70 +272,142 @@ export default function TodayPage() {
 
       {!loading && !err && (
         <div className="grid gap-4">
-          {/* 1) Review due */}
-          <Card
-            title="Review due now"
-            subtitle="Spaced repetition — clear what’s scheduled."
-            right={<Pill text={dueReviewCount > 0 ? `${dueReviewCount} due` : "0 due"} />}
-          >
-            <div className="text-sm text-gray-700">
-              {dueReviewCount > 0
-                ? `You have ${dueReviewCount} questions scheduled. Clear them to keep mistakes from sticking.`
-                : "Nothing is due right now. Good. New mistakes will show up here after practice."}
-            </div>
+          <LoopRail
+            active={dueReviewCount > 0 ? "Review" : weakestOverall?.row ? "Practice" : "Practice"}
+            note={
+              dueReviewCount > 0
+                ? "Recovery comes before fresh volume."
+                : "Use today to generate signal, repair one weak zone, then let review catch misses."
+            }
+          />
 
-            <div className="mt-4 grid gap-3">
-              {dueReviewCount > 0 ? (
-                <PrimaryButton href="/review">Start review</PrimaryButton>
-              ) : (
-                <SecondaryButton href="/review">Open review</SecondaryButton>
-              )}
+          <Card
+            title="Today’s priority"
+            subtitle="One best next action for this session."
+            right={<Pill text={priority.pill} tone="accent" />}
+            accent
+          >
+            <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
+                Priority
+              </div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight text-black">
+                {priority.title}
+              </div>
+              <div className="mt-3 max-w-3xl text-sm leading-relaxed text-gray-700">
+                {priority.reason}
+              </div>
+
+              <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:max-w-2xl">
+                <PrimaryButton href={priority.ctaHref}>{priority.ctaLabel}</PrimaryButton>
+                <SecondaryButton href={priority.secondaryHref}>{priority.secondaryLabel}</SecondaryButton>
+              </div>
             </div>
           </Card>
 
-          {/* 2) Recommended next */}
-          <Card
-            title="Recommended next"
-            subtitle="Based on your weakest subskill."
-            right={<Pill text={subjectFocus} />}
-          >
-            <div className="text-sm text-gray-700">
-              {weakest ? (
+          <div className="grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+            <Card
+              title="Recovery status"
+              subtitle="Spaced review protects against repeated mistakes."
+              right={
+                <Pill
+                  text={dueReviewCount > 0 ? `${dueReviewCount} due` : "Clear"}
+                  tone={dueReviewCount > 0 ? "accent" : "success"}
+                />
+              }
+            >
+              <div className="text-sm leading-relaxed text-gray-700">
+                {dueReviewCount > 0
+                  ? "Review is active. Clear due items now so mistakes do not stay live while you push forward."
+                  : "Nothing is due right now. That means you are free to focus on fresh practice or targeted repair."}
+              </div>
+
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                {dueReviewCount > 0 ? (
+                  <PrimaryButton href="/review">Open review</PrimaryButton>
+                ) : (
+                  <SecondaryButton href="/review">Check review</SecondaryButton>
+                )}
+                <SecondaryButton href="/practice?subject=Reading">Start practice</SecondaryButton>
+              </div>
+            </Card>
+
+            <Card
+              title="Weak zone"
+              subtitle="The weakest current signal across tracked subskills."
+              right={
+                weakestOverall?.row ? (
+                  <Pill text={`${confidenceLabel(weakestOverall.row.attempts)} confidence`} tone="accent" />
+                ) : (
+                  <Pill text="No signal yet" />
+                )
+              }
+            >
+              {weakestOverall?.row ? (
                 <>
-                  Fix <span className="font-semibold">{weakest.subskill}</span> — accuracy{" "}
-                  <span className="font-semibold">{Math.round((weakest.accuracy ?? 0) * 100)}%</span>{" "}
-                  (n={weakest.attempts}) • confidence {confidenceLabel(weakest.attempts)}.
+                  <div className="text-lg font-semibold text-black">{weakestOverall.row.subskill}</div>
+                  <div className="mt-1 text-sm text-gray-700">
+                    {weakestOverall.subject} • {weakestOverall.row.domain} • {weakestOverall.row.skill}
+                  </div>
+                  <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                    {Math.round((weakestOverall.row.accuracy ?? 0) * 100)}% accuracy over{" "}
+                    {weakestOverall.row.attempts} attempts.
+                  </div>
+
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                    <PrimaryButton href={weakestHref}>Practice this</PrimaryButton>
+                    <SecondaryButton href={weakestLessonHref}>Open lesson</SecondaryButton>
+                  </div>
                 </>
               ) : (
-                "Do one clean 12Q set to generate useful skill signals."
+                <>
+                  <div className="text-sm text-gray-700">
+                    You do not have enough data yet for reliable weak-zone ranking.
+                  </div>
+                  <div className="mt-5 grid gap-3">
+                    <PrimaryButton href="/practice?subject=Reading">Generate signal</PrimaryButton>
+                  </div>
+                </>
               )}
-            </div>
+            </Card>
+          </div>
 
-            <div className="mt-4 grid gap-3">
-              <PrimaryButton href={nextPracticeHref}>Practice 12Q</PrimaryButton>
-              <SecondaryButton href="/skills">Open skills map</SecondaryButton>
-            </div>
-          </Card>
-
-          {/* 3) This week */}
-          <Card title="This week" subtitle="Your weekly activity snapshot.">
-            <div className="grid grid-cols-2 gap-4">
+          <Card title="Weekly snapshot" subtitle="Support metrics, not the main decision layer.">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <StatBox
                 label="Weekly points"
                 value={myWeeklyPoints !== null ? String(myWeeklyPoints) : "—"}
-                hint="Practice + review, adjusted by accuracy"
+                hint="Practice + review, weighted by accuracy"
+                accent
               />
               <StatBox
                 label="Global rank"
                 value={myRank ? `#${myRank}` : "—"}
-                hint="Based on weekly points"
+                hint="League position this week"
+              />
+              <StatBox
+                label="Review due"
+                value={String(dueReviewCount)}
+                hint="Current recovery pressure"
+                accent={dueReviewCount > 0}
+              />
+              <StatBox
+                label="Countdown"
+                value={countdownText}
+                hint="Based on your SAT date"
               />
             </div>
 
-            <div className="mt-4 flex gap-4 text-sm">
-              <Link className="underline text-gray-700 hover:text-black" href="/leagues">Open leagues</Link>
-              <Link className="underline text-gray-700 hover:text-black" href="/practice?subject=Reading">Practice</Link>
-              <Link className="underline text-gray-700 hover:text-black" href="/profile">Edit profile</Link>
+            <div className="mt-5 flex flex-wrap gap-4 text-sm">
+              <Link className="underline text-gray-700 hover:text-black" href="/skills">
+                Open skills map
+              </Link>
+              <Link className="underline text-gray-700 hover:text-black" href="/lessons">
+                Open lessons
+              </Link>
+              <Link className="underline text-gray-700 hover:text-black" href="/profile">
+                Edit profile
+              </Link>
             </div>
           </Card>
         </div>

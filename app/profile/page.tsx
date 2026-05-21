@@ -204,7 +204,7 @@ export default function ProfilePage() {
 
             {/* Quick summary row */}
             <div className="grid grid-cols-2 gap-4">
-              <StatBox label="Name" value={displayName} hint="Shown on leagues" />
+              <StatBox label="Name" value={displayName} hint="Shown in community" />
               <StatBox label="Target" value={`${clampNumberString(targetScore, 800, 1600, 1400)}`} hint="Goal (not prediction)" />
             </div>
 
@@ -262,7 +262,7 @@ export default function ProfilePage() {
 
             <div className="flex gap-4 text-sm">
               <a className="underline text-gray-700 hover:text-black" href="/skills">Skills</a>
-              <a className="underline text-gray-700 hover:text-black" href="/leagues">Leagues</a>
+              <a className="underline text-gray-700 hover:text-black" href="/leagues">Community</a>
               <a className="underline text-gray-700 hover:text-black" href="/review">Review</a>
             </div>
           </div>

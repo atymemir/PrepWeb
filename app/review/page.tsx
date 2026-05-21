@@ -4,7 +4,8 @@ export const dynamic = 'force-dynamic';
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
-import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import ReportQuestion from "../components/ReportQuestion";
 
 type Question = {
   id: string;
@@ -20,8 +21,29 @@ type Question = {
   difficulty_level: number | null;
 };
 
+type ReviewAnswer = {
+  selected: string;
+  correct: boolean;
+  subject: string;
+  topic: string | null;
+};
+
 function clampInt(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
+}
+
+function queueLabel(n: number) {
+  if (n === 0) return "Clear";
+  if (n <= 4) return "Light queue";
+  if (n <= 8) return "Moderate queue";
+  return "Heavy queue";
+}
+
+function nextStepLabel(accuracyPct: number, total: number) {
+  if (total === 0) return "Start fresh practice";
+  if (accuracyPct < 50) return "Open lesson and re-practice";
+  if (accuracyPct < 75) return "Do one focused practice set";
+  return "Return to forward practice";
 }
 
 export default function ReviewPage() {
@@ -30,7 +52,6 @@ export default function ReviewPage() {
 
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState<"ready" | "in_session" | "done">("ready");
-
   const [err, setErr] = useState<string | null>(null);
 
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -41,14 +62,12 @@ export default function ReviewPage() {
   const [feedback, setFeedback] = useState<{ correct: boolean; correctOption: string } | null>(null);
 
   const [startedAt, setStartedAt] = useState<number>(Date.now());
-
-  const [answers, setAnswers] = useState<Record<string, { selected: string; correct: boolean }>>({});
+  const [answers, setAnswers] = useState<Record<string, ReviewAnswer>>({});
   const [saving, setSaving] = useState(false);
 
   const lastSubmitRef = useRef<{
     questionId: string;
     selected: string;
-    isCorrect: boolean;
     timeTaken: number;
   } | null>(null);
 
@@ -56,8 +75,40 @@ export default function ReviewPage() {
   const total = questions.length;
 
   const answeredCount = useMemo(() => Object.keys(answers).length, [answers]);
-  const correctCount = useMemo(() => Object.values(answers).filter(a => a.correct).length, [answers]);
-  const accuracyPct = useMemo(() => (answeredCount ? Math.round((correctCount / answeredCount) * 100) : 0), [answeredCount, correctCount]);
+  const correctCount = useMemo(
+    () => Object.values(answers).filter((a) => a.correct).length,
+    [answers]
+  );
+  const accuracyPct = useMemo(
+    () => (answeredCount ? Math.round((correctCount / answeredCount) * 100) : 0),
+    [answeredCount, correctCount]
+  );
+
+  const queueTone = useMemo(() => {
+    if (questions.length === 0) return "success" as const;
+    if (questions.length <= 4) return "accent" as const;
+    if (questions.length <= 8) return "accent" as const;
+    return "danger" as const;
+  }, [questions.length]);
+
+  const postReviewNextStep = useMemo(
+    () => nextStepLabel(accuracyPct, total),
+    [accuracyPct, total]
+  );
+
+  const reviewTarget = useMemo(() => {
+    const missed = Object.values(answers).filter((answer) => !answer.correct && answer.topic);
+    if (!missed.length) return null;
+
+    const ranked = [...missed].sort((a, b) => {
+      const aCount = missed.filter((x) => x.topic === a.topic).length;
+      const bCount = missed.filter((x) => x.topic === b.topic).length;
+      if (aCount !== bCount) return bCount - aCount;
+      return a.topic!.localeCompare(b.topic!);
+    });
+
+    return ranked[0];
+  }, [answers]);
 
   function optionText(letter: string) {
     if (!q) return "";
@@ -81,10 +132,12 @@ export default function ReviewPage() {
     const supabase = getSupabase();
     const { data, error } = await supabase.auth.getSession();
     if (error) throw new Error(error.message);
+
     if (!data.session) {
       router.push("/login");
       return null;
     }
+
     return data.session.user.id;
   }
 
@@ -142,31 +195,55 @@ export default function ReviewPage() {
     try {
       const timeTaken = clampInt(Math.round((Date.now() - startedAt) / 1000), 0, 60 * 60);
       const selectedOpt = selected.toUpperCase();
-      const correctOpt = q.correct_option.toUpperCase();
-      const isCorrect = selectedOpt === correctOpt;
 
-      // store for retry if rpc fails mid-way
       lastSubmitRef.current = {
         questionId: q.id,
         selected: selectedOpt,
-        isCorrect,
         timeTaken,
       };
 
       const supabase = getSupabase();
-      const { error } = await supabase.rpc("record_answer_event", {
-        p_question_id: q.id,
-        p_selected_option: selectedOpt,
-        p_is_correct: isCorrect,
-        p_is_review: true,
-        p_time_taken_seconds: timeTaken,
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error("You need to sign in.");
+      }
+
+      const res = await fetch("/api/answer-event", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          question_id: q.id,
+          selected_option: selectedOpt,
+          is_review: true,
+          time_taken_seconds: timeTaken,
+        }),
       });
 
-      if (error) throw new Error(error.message);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || "Failed to record review answer.");
+      }
 
-      // local scoring
-      setAnswers(prev => ({ ...prev, [q.id]: { selected: selectedOpt, correct: isCorrect } }));
-      setFeedback({ correct: isCorrect, correctOption: correctOpt });
+      setAnswers((prev) => ({
+        ...prev,
+        [q.id]: {
+          selected: selectedOpt,
+          correct: !!data.is_correct,
+          subject: q.subject,
+          topic: q.topic,
+        },
+      }));
+
+      setFeedback({
+        correct: !!data.is_correct,
+        correctOption: String(data.correct_option || q.correct_option).toUpperCase(),
+      });
       setLocked(true);
     } catch (e: any) {
       setErr(e?.message || "Failed to record review answer.");
@@ -177,27 +254,53 @@ export default function ReviewPage() {
 
   async function retryRecord() {
     if (!lastSubmitRef.current) return;
+
     setSaving(true);
     setErr(null);
 
     try {
       const supabase = getSupabase();
       const t = lastSubmitRef.current;
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
 
-      const { error } = await supabase.rpc("record_answer_event", {
-        p_question_id: t.questionId,
-        p_selected_option: t.selected,
-        p_is_correct: t.isCorrect,
-        p_is_review: true,
-        p_time_taken_seconds: t.timeTaken,
+      if (!session?.access_token) {
+        throw new Error("You need to sign in.");
+      }
+
+      const res = await fetch("/api/answer-event", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          question_id: t.questionId,
+          selected_option: t.selected,
+          is_review: true,
+          time_taken_seconds: t.timeTaken,
+        }),
       });
 
-      if (error) throw new Error(error.message);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || "Retry failed.");
+      }
 
-      // If retry succeeds, lock UI as if it succeeded
-      const correctOpt = q?.correct_option?.toUpperCase() ?? "—";
-      setAnswers(prev => ({ ...prev, [t.questionId]: { selected: t.selected, correct: t.isCorrect } }));
-      setFeedback({ correct: t.isCorrect, correctOption: correctOpt });
+      const correctOpt = String(data.correct_option || q?.correct_option || "—").toUpperCase();
+
+      setAnswers((prev) => ({
+        ...prev,
+        [t.questionId]: {
+          selected: t.selected,
+          correct: !!data.is_correct,
+          subject: q?.subject ?? "Reading",
+          topic: q?.topic ?? null,
+        },
+      }));
+
+      setFeedback({ correct: !!data.is_correct, correctOption: correctOpt });
       setLocked(true);
     } catch (e: any) {
       setErr(e?.message || "Retry failed.");
@@ -215,7 +318,7 @@ export default function ReviewPage() {
       return;
     }
 
-    setIdx(i => i + 1);
+    setIdx((i) => i + 1);
     resetQuestionUI();
     lastSubmitRef.current = null;
   }
@@ -224,169 +327,268 @@ export default function ReviewPage() {
     <main className="min-h-screen">
       <PageHeader
         title="Review"
-        subtitle="Spaced repetition: due questions only."
+        subtitle="Recovery workflow. Clear due mistakes before you push new practice."
         right={
-          <button onClick={() => router.push("/today")} className="text-sm font-semibold text-gray-600 hover:text-black underline">
+          <button
+            onClick={() => router.push("/today")}
+            className="text-sm font-semibold text-gray-600 hover:text-black underline"
+          >
             Back
           </button>
         }
       />
 
-      <Card
-        title={mode === "in_session" ? `Due question ${idx + 1} / ${Math.max(total, 1)}` : "Review queue"}
-        subtitle={mode === "in_session" ? `Accuracy so far: ${accuracyPct}%` : "Clear what’s scheduled. Wrong answers return sooner."}
-        right={<Pill text={mode === "in_session" ? "Review mode" : `${questions.length} due`} />}
-      >
-        {loading && <div className="text-sm text-gray-600">Loading…</div>}
+      {!loading && !err && (
+        <LoopRail
+          active="Review"
+          note="Review clears active mistake debt before more forward work."
+        />
+      )}
 
-        {!loading && err && (
-          <div>
-            <div className="text-sm text-red-600">{err}</div>
-            <div className="mt-4 grid gap-3">
-              <PrimaryButton onClick={loadDuePreview}>Try again</PrimaryButton>
-              <SecondaryButton href="/today">Back to Today</SecondaryButton>
-            </div>
+      {loading && (
+        <Card title="Loading…" subtitle="Pulling your review queue">
+          <div className="text-sm text-gray-600">Please wait.</div>
+        </Card>
+      )}
+
+      {!loading && err && (
+        <Card title="Error" subtitle="Review could not load">
+          <div className="text-sm text-red-600">{err}</div>
+          <div className="mt-4 grid gap-3">
+            <PrimaryButton onClick={loadDuePreview}>Try again</PrimaryButton>
+            <SecondaryButton href="/today">Back to Today</SecondaryButton>
           </div>
-        )}
+        </Card>
+      )}
 
-        {!loading && !err && mode === "ready" && questions.length === 0 && (
-          <div>
-            <div className="text-sm text-gray-700">
-              No review is due right now. Do practice to generate mistakes, or come back later.
-            </div>
-            <div className="mt-4 grid gap-3">
-              <PrimaryButton href="/practice?subject=Reading">Practice Reading (12Q)</PrimaryButton>
-              <SecondaryButton href="/practice?subject=Math">Practice Math (12Q)</SecondaryButton>
-            </div>
-          </div>
-        )}
-
-        {!loading && !err && mode === "ready" && questions.length > 0 && (
-          <div>
-            <div className="grid grid-cols-2 gap-4">
-              <StatBox label="Due now" value={`${questions.length}`} hint="Scheduled review items" />
-              <StatBox label="Session size" value={`${limit}`} hint="Max due pulled" />
-            </div>
-            <div className="mt-4 text-sm text-gray-700">
-              Clear due items to stop mistakes from sticking. Your correct streak schedules items further out.
-            </div>
-            <div className="mt-5 grid gap-3">
-              <PrimaryButton onClick={startSession}>Start review</PrimaryButton>
-              <SecondaryButton href="/skills">Open Skills</SecondaryButton>
-            </div>
-          </div>
-        )}
-
-        {!loading && !err && mode === "done" && (
-          <div>
-            <div className="grid grid-cols-2 gap-4">
-              <StatBox label="Reviewed" value={`${answeredCount}/${total}`} hint="Answered / due set" />
-              <StatBox label="Accuracy" value={`${accuracyPct}%`} hint="This review session" />
-            </div>
-
-            <div className="mt-4 text-sm text-gray-700">
-              Good. Keep the loop: Practice → Review → Skills.
-            </div>
-
-            <div className="mt-5 grid gap-3">
-              <PrimaryButton onClick={loadDuePreview}>Check due again</PrimaryButton>
-              <SecondaryButton href="/practice?subject=Reading">Practice (12Q)</SecondaryButton>
-              <SecondaryButton href="/today">Back to Today</SecondaryButton>
-            </div>
-          </div>
-        )}
-
-        {!loading && !err && mode === "in_session" && q && (
-          <div>
-            <div className="text-base font-medium leading-relaxed whitespace-pre-line">
-              {q.question_text}
-            </div>
-
-            <div className="mt-6 space-y-3">
-              {(["A", "B", "C", "D"] as const).map(letter => {
-                const chosen = selected === letter;
-                const correct = locked && q.correct_option.toUpperCase() === letter;
-                const wrongChosen = locked && chosen && !correct;
-
-                let cls = "border border-gray-200";
-                if (chosen) cls = "border border-black";
-                if (correct) cls = "border border-green-600 bg-green-50";
-                if (wrongChosen) cls = "border border-red-600 bg-red-50";
-
-                return (
-                  <button
-                    key={letter}
-                    onClick={() => pick(letter)}
-                    className={`w-full text-left rounded-xl p-4 ${cls}`}
-                    disabled={saving}
-                  >
-                    <div className="text-xs font-semibold text-gray-500 mb-1">{letter}</div>
-                    <div className="text-sm text-gray-900">{optionText(letter)}</div>
-                  </button>
-                );
-              })}
-            </div>
-
-            {err && (
-              <div className="mt-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-                {err}
-                <div className="mt-3 grid gap-2">
-                  <PrimaryButton onClick={retryRecord} disabled={saving}>
-                    {saving ? "Retrying…" : "Retry record"}
-                  </PrimaryButton>
+      {!loading && !err && mode === "ready" && (
+        <div className="grid gap-4">
+          <Card
+            title="Recovery queue"
+            subtitle="What is due now should be cleared before more forward work."
+            right={<Pill text={queueLabel(questions.length)} tone={queueTone} />}
+            accent={questions.length > 0}
+          >
+            {questions.length === 0 ? (
+              <>
+                <div className="text-sm text-gray-700">
+                  No review is due right now. Good. That means your queue is clear and you can safely return to fresh practice.
                 </div>
-              </div>
-            )}
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  <PrimaryButton href="/practice?subject=Reading">Practice Reading</PrimaryButton>
+                  <SecondaryButton href="/practice?subject=Math">Practice Math</SecondaryButton>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <StatBox
+                    label="Due now"
+                    value={String(questions.length)}
+                    hint="Items currently scheduled"
+                    accent
+                  />
+                  <StatBox
+                    label="Session cap"
+                    value={String(limit)}
+                    hint="Maximum pulled into this queue"
+                  />
+                  <StatBox
+                    label="Priority"
+                    value={questions.length >= 6 ? "High" : "Normal"}
+                    hint="Based on current due load"
+                  />
+                </div>
 
-            <div className="mt-6 flex gap-3 items-start">
-              {!locked ? (
+                <div className="mt-5 text-sm leading-relaxed text-gray-700">
+                  Review is the repair half of the system. Clear due items now so mistakes do not remain active when you go back into fresh practice.
+                </div>
+
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  <PrimaryButton onClick={startSession}>Start review</PrimaryButton>
+                  <SecondaryButton href="/skills">Open skills</SecondaryButton>
+                </div>
+              </>
+            )}
+          </Card>
+
+          {questions.length > 0 && (
+            <Card title="What happens after review?" subtitle="The next action depends on how cleanly you recover.">
+              <div className="grid gap-4 sm:grid-cols-3">
+                <StatBox label="<50%" value="Rebuild" hint="Open lesson, then practice again" />
+                <StatBox label="50–74%" value="Stabilize" hint="Do one focused practice set" accent />
+                <StatBox label="75%+" value="Advance" hint="Return to normal forward work" />
+              </div>
+            </Card>
+          )}
+        </div>
+      )}
+
+      {!loading && !err && mode === "in_session" && q && (
+        <Card
+          title={`Recovery item ${idx + 1} / ${Math.max(total, 1)}`}
+          subtitle={`Accuracy so far: ${accuracyPct}%`}
+          right={<Pill text="Review mode" tone="accent" />}
+          accent
+        >
+          <div className="text-base font-medium leading-relaxed whitespace-pre-line text-black">
+            {q.question_text}
+          </div>
+
+          <div className="mt-6 space-y-3">
+            {(["A", "B", "C", "D"] as const).map((letter) => {
+              const chosen = selected === letter;
+              const correct = locked && q.correct_option.toUpperCase() === letter;
+              const wrongChosen = locked && chosen && !correct;
+
+              let cls = "border border-gray-200 bg-white";
+              if (chosen) cls = "border-[#004aad] bg-[#eef4ff]";
+              if (correct) cls = "border-green-600 bg-green-50";
+              if (wrongChosen) cls = "border-red-600 bg-red-50";
+
+              return (
                 <button
-                  className="rounded-xl bg-black text-white py-3 px-4 text-sm font-semibold disabled:opacity-60"
-                  onClick={submit}
-                  disabled={!selected || saving}
-                >
-                  {saving ? "Saving…" : "Submit"}
-                </button>
-              ) : (
-                <button
-                  className="rounded-xl bg-black text-white py-3 px-4 text-sm font-semibold disabled:opacity-60"
-                  onClick={nextOrFinish}
+                  key={letter}
+                  onClick={() => pick(letter)}
+                  className={`w-full rounded-xl p-4 text-left ${cls}`}
                   disabled={saving}
                 >
-                  {idx === total - 1 ? "Finish" : "Next"}
+                  <div className="mb-1 text-xs font-semibold text-gray-500">{letter}</div>
+                  <div className="text-sm text-gray-900">{optionText(letter)}</div>
                 </button>
-              )}
+              );
+            })}
+          </div>
 
-              {locked && feedback && (
-                <div className="flex-1 rounded-xl border border-gray-200 p-4">
-                  <div className={`font-semibold ${feedback.correct ? "text-green-700" : "text-red-700"}`}>
-                    {feedback.correct ? "Correct" : "Incorrect"}
-                  </div>
+          {err && (
+            <div className="mt-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+              {err}
+              <div className="mt-3 grid gap-2">
+                <PrimaryButton onClick={retryRecord} disabled={saving}>
+                  {saving ? "Retrying…" : "Retry record"}
+                </PrimaryButton>
+              </div>
+            </div>
+          )}
 
-                  {!feedback.correct && (
-                    <div className="text-sm text-gray-700 mt-1">
-                      Correct answer: <span className="font-semibold">{feedback.correctOption}</span>
-                    </div>
-                  )}
+          <div className="mt-6 flex gap-3 items-start">
+            {!locked ? (
+              <button
+                className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
+                onClick={submit}
+                disabled={!selected || saving}
+              >
+                {saving ? "Saving…" : "Submit"}
+              </button>
+            ) : (
+              <button
+                className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
+                onClick={nextOrFinish}
+                disabled={saving}
+              >
+                {idx === total - 1 ? "Finish" : "Next"}
+              </button>
+            )}
 
-                  {q.explanation ? (
-                    <div className="mt-3 text-sm text-gray-700 whitespace-pre-line">
-                      <span className="font-semibold">Explanation:</span>{" "}
-                      {q.explanation}
-                    </div>
-                  ) : (
-                    <div className="mt-3 text-sm text-gray-600">No explanation available yet.</div>
-                  )}
+            {locked && feedback && (
+              <div className="flex-1 rounded-xl border border-gray-200 p-4">
+                <div className={`font-semibold ${feedback.correct ? "text-green-700" : "text-red-700"}`}>
+                  {feedback.correct ? "Recovered" : "Still unstable"}
                 </div>
+
+                {!feedback.correct && (
+                  <div className="mt-1 text-sm text-gray-700">
+                    Correct answer: <span className="font-semibold">{feedback.correctOption}</span>
+                  </div>
+                )}
+
+                {q.explanation ? (
+                  <div className="mt-3 text-sm text-gray-700 whitespace-pre-line">
+                    <span className="font-semibold">Explanation:</span> {q.explanation}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-sm text-gray-600">No explanation available yet.</div>
+                )}
+                {q && (
+                  <ReportQuestion
+                    questionId={q.id}
+                    source="ReviewWeb"
+                    subject={q.subject}
+                    subskill={q.topic || undefined}
+                  />
+                )}
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {!loading && !err && mode === "done" && (
+        <div className="grid gap-4">
+          <Card
+            title="Recovery session complete"
+            subtitle="Now decide what should happen next."
+            right={<Pill text={postReviewNextStep} tone={accuracyPct >= 75 ? "success" : accuracyPct >= 50 ? "accent" : "danger"} />}
+            accent
+          >
+            <div className="grid gap-4 sm:grid-cols-3">
+              <StatBox
+                label="Reviewed"
+                value={`${answeredCount}/${total}`}
+                hint="Answered / queued"
+              />
+              <StatBox
+                label="Accuracy"
+                value={`${accuracyPct}%`}
+                hint="This recovery session"
+                accent={accuracyPct >= 50}
+              />
+              <StatBox
+                label="Next move"
+                value={postReviewNextStep}
+                hint="Based on recovery quality"
+              />
+            </div>
+
+            <div className="mt-5 text-sm text-gray-700">
+              {accuracyPct < 50
+                ? reviewTarget
+                  ? `Recovery was weak. Start repair on ${reviewTarget.topic} before adding broad new practice.`
+                  : "Recovery was weak. Do not just move on. Open the skills map and rebuild the unstable concept."
+                : accuracyPct < 75
+                ? reviewTarget
+                  ? `Recovery was partial. One focused practice set on ${reviewTarget.topic} is the right next step.`
+                  : "Recovery was partial. One focused practice set on the weak area is the right next step."
+                : "Recovery was clean enough. You can safely return to normal forward practice."}
+            </div>
+
+            <div className="mt-5 grid gap-3 sm:grid-cols-3">
+              <PrimaryButton onClick={loadDuePreview}>Check due again</PrimaryButton>
+              {reviewTarget?.topic ? (
+                <>
+                  <SecondaryButton
+                    href={`/lesson/${encodeURIComponent(reviewTarget.topic)}`}
+                  >
+                    Open repair lesson
+                  </SecondaryButton>
+                  <SecondaryButton
+                    href={`/practice?subject=${reviewTarget.subject}&subskill=${encodeURIComponent(
+                      reviewTarget.topic
+                    )}`}
+                  >
+                    Practice missed skill
+                  </SecondaryButton>
+                </>
+              ) : (
+                <>
+                  <SecondaryButton href="/skills">Open skills</SecondaryButton>
+                  <SecondaryButton href="/practice?subject=Reading">Go to practice</SecondaryButton>
+                </>
               )}
             </div>
-          </div>
-        )}
-      </Card>
-
-      <div className="mt-6 text-xs text-gray-500">
-        Notes: Review writes each answer immediately via <code>record_answer_event</code> to update spaced scheduling.
-      </div>
+          </Card>
+        </div>
+      )}
     </main>
   );
 }

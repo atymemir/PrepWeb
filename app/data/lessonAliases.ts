@@ -1,0 +1,33 @@
+export const LESSON_ALIASES: Record<string, string> = {
+  "information and ideas": "Central Ideas and Details",
+  "craft and structure": "Text Structure and Purpose",
+  "expression of ideas": "Rhetorical Synthesis",
+  "standard english conventions": "Boundaries",
+
+  "words in context": "Words in Context",
+  "text structure and purpose": "Text Structure and Purpose",
+  "cross text connections": "Cross-Text Connections",
+  "central ideas and details": "Central Ideas and Details",
+  "inferences": "Inferences",
+  "command of evidence": "Command of Evidence",
+  "boundaries": "Boundaries",
+  "form structure and sense": "Form, Structure, and Sense",
+  "transitions": "Transitions",
+  "rhetorical synthesis": "Rhetorical Synthesis",
+
+  "linear equations in one variable": "Linear Equations in One Variable",
+  "linear equations in two variables": "Linear Equations in Two Variables",
+  "systems of linear equations": "Systems of Linear Equations",
+  "linear inequalities": "Linear Inequalities",
+  "functions and notation": "Functions and Notation",
+  "quadratics and polynomials": "Quadratics and Polynomials",
+  "exponents and radicals": "Exponents and Radicals",
+  "ratios rates and percent": "Ratios, Rates, and Percent",
+  "data analysis and probability": "Data Analysis and Probability",
+  "geometry triangles circles and trig": "Geometry: Triangles, Circles, and Trig",
+
+  "algebra": "Linear Equations in One Variable",
+  "advanced math": "Functions and Notation",
+  "problem solving and data analysis": "Ratios, Rates, and Percent",
+  "geometry and trigonometry": "Geometry: Triangles, Circles, and Trig",
+};

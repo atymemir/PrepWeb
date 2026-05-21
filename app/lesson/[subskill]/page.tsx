@@ -1,9 +1,9 @@
 import { notFound } from "next/navigation";
-import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../../ui/ui";
-import { LESSONS } from "../../data/lessons";
+import Link from "next/link";
+import { resolveLesson } from "@/app/lib/lessonResolver";
 
 export default function LessonPage({ params }: { params: { subskill: string } }) {
-  const lesson = LESSONS.find((lesson) => lesson.key === params.subskill);
+  const lesson = resolveLesson(params.subskill);
 
   if (!lesson) {
     notFound();
@@ -11,51 +11,79 @@ export default function LessonPage({ params }: { params: { subskill: string } })
 
   return (
     <main className="min-h-screen">
-      <PageHeader
-        title={lesson.title}
-        subtitle={lesson.summary}
-        right={<Pill text={lesson.key} />}
-      />
+      <div className="rounded-3xl border border-gray-200 bg-white p-6 sm:p-8">
+        <div className="flex flex-wrap gap-2">
+          {lesson.subject ? (
+            <span className="inline-flex items-center rounded-full border border-gray-200 px-3 py-1 text-xs font-semibold text-gray-600">
+              {lesson.subject}
+            </span>
+          ) : null}
 
-      <div className="space-y-6">
-        <Card title="Key points">
-          <ul className="space-y-3 text-sm text-gray-700">
-            {lesson.keyPoints.map((point, index) => (
-              <li key={index} className="list-disc pl-5">
-                {point}
-              </li>
-            ))}
-          </ul>
-        </Card>
+          {lesson.domain ? (
+            <span className="inline-flex items-center rounded-full border border-gray-200 px-3 py-1 text-xs font-semibold text-gray-600">
+              {lesson.domain}
+            </span>
+          ) : null}
+        </div>
 
-        <Card title="Common traps">
-          <ul className="space-y-3 text-sm text-gray-700">
-            {lesson.commonTraps.map((trap, index) => (
-              <li key={index} className="list-disc pl-5">
-                {trap}
-              </li>
-            ))}
-          </ul>
-        </Card>
+        <h1 className="mt-4 text-3xl font-semibold tracking-tight">{lesson.title}</h1>
 
-        <Card title="Mini example">
-          <div className="space-y-3 text-sm text-gray-700">
-            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
-              <div className="font-semibold text-black">Prompt</div>
-              <div className="mt-2 whitespace-pre-wrap">{lesson.miniExample.prompt}</div>
-            </div>
-            <div className="rounded-2xl border border-gray-200 bg-white p-4">
-              <div className="font-semibold text-black">Answer</div>
-              <div className="mt-2 whitespace-pre-wrap">{lesson.miniExample.answer}</div>
-            </div>
+        <p className="mt-3 max-w-3xl text-sm leading-relaxed text-gray-600 sm:text-base">
+          {lesson.summary}
+        </p>
+
+        <div className="mt-6 grid gap-4 lg:grid-cols-2">
+          <div className="rounded-2xl border border-gray-200 p-5">
+            <div className="text-sm font-semibold text-black">Key points</div>
+            <ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-gray-700">
+              {lesson.keyPoints.map((point, i) => (
+                <li key={i}>{point}</li>
+              ))}
+            </ul>
           </div>
-        </Card>
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <PrimaryButton href={`/practice?subskill=${encodeURIComponent(lesson.key)}`}>
-            Practice this subskill
-          </PrimaryButton>
-          <SecondaryButton href="/skills">Back to Skills</SecondaryButton>
+          <div className="rounded-2xl border border-gray-200 p-5">
+            <div className="text-sm font-semibold text-black">Common traps</div>
+            <ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-gray-700">
+              {lesson.commonTraps.map((trap, i) => (
+                <li key={i}>{trap}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-2xl border border-gray-200 p-5">
+          <div className="text-sm font-semibold text-black">Mini example</div>
+
+          <div className="mt-4 text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+            Prompt
+          </div>
+          <div className="mt-1 whitespace-pre-line text-sm text-gray-700">
+            {lesson.miniExample.prompt}
+          </div>
+
+          <div className="mt-4 text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+            Answer
+          </div>
+          <div className="mt-1 whitespace-pre-line text-sm text-gray-700">
+            {lesson.miniExample.answer}
+          </div>
+        </div>
+
+        <div className="mt-6 flex flex-wrap gap-3">
+          <Link
+            href={`/practice?subject=${lesson.subject ?? "Reading"}&subskill=${encodeURIComponent(lesson.key)}`}
+            className="inline-flex items-center justify-center rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+          >
+            Practice this
+          </Link>
+
+          <Link
+            href="/lessons"
+            className="inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-black transition hover:bg-gray-50"
+          >
+            Back to lessons
+          </Link>
         </div>
       </div>
     </main>
