@@ -4,8 +4,12 @@ export const dynamic = 'force-dynamic';
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
+import { analyzeReviewSession } from "../lib/sessionAnalysis";
+import { requestQuestionExplanation, type AiExplanation } from "../lib/questionExplanation";
+import { errorMessage } from "../lib/errors";
+import { recordAnswerEvent } from "../lib/answerEvents";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
-import ReportQuestion from "../components/ReportQuestion";
+import QuestionActionBlock from "../components/QuestionActionBlock";
 
 type Question = {
   id: string;
@@ -39,11 +43,23 @@ function queueLabel(n: number) {
   return "Heavy queue";
 }
 
-function nextStepLabel(accuracyPct: number, total: number) {
-  if (total === 0) return "Start fresh practice";
-  if (accuracyPct < 50) return "Open lesson and re-practice";
-  if (accuracyPct < 75) return "Do one focused practice set";
-  return "Return to forward practice";
+function topicKey(topic: string | null) {
+  return topic?.trim() || "Unknown";
+}
+
+function reviewReasonFor(args: {
+  question: Question;
+  questions: Question[];
+  answers: Record<string, ReviewAnswer>;
+}): "new mistake" | "failed recovery" | "low-confidence recovery" | "repeated relapse" {
+  const topic = topicKey(args.question.topic);
+  const topicAnswers = Object.values(args.answers).filter((answer) => topicKey(answer.topic) === topic);
+  if (topicAnswers.some((answer) => !answer.correct)) return "failed recovery";
+  if (topic === "Unknown") return "low-confidence recovery";
+  if (args.questions.filter((question) => topicKey(question.topic) === topic).length > 1) {
+    return "repeated relapse";
+  }
+  return "new mistake";
 }
 
 export default function ReviewPage() {
@@ -60,9 +76,22 @@ export default function ReviewPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
   const [feedback, setFeedback] = useState<{ correct: boolean; correctOption: string } | null>(null);
+  const [aiExplainLoading, setAiExplainLoading] = useState(false);
+  const [aiExplainError, setAiExplainError] = useState<string | null>(null);
+  const [aiExplain, setAiExplain] = useState<AiExplanation | null>(null);
 
-  const [startedAt, setStartedAt] = useState<number>(Date.now());
-  const [answers, setAnswers] = useState<Record<string, ReviewAnswer>>({});
+  const [startedAt, setStartedAt] = useState<number>(() => Date.now());
+  const [answers, setAnswers] = useState<
+    Record<
+      string,
+      {
+        selected: string;
+        correct: boolean;
+        topic: string | null;
+        subject: string;
+      }
+    >
+  >({});
   const [saving, setSaving] = useState(false);
 
   const lastSubmitRef = useRef<{
@@ -74,15 +103,18 @@ export default function ReviewPage() {
   const q = questions[idx];
   const total = questions.length;
 
-  const answeredCount = useMemo(() => Object.keys(answers).length, [answers]);
-  const correctCount = useMemo(
-    () => Object.values(answers).filter((a) => a.correct).length,
-    [answers]
-  );
-  const accuracyPct = useMemo(
-    () => (answeredCount ? Math.round((correctCount / answeredCount) * 100) : 0),
-    [answeredCount, correctCount]
-  );
+  const reviewAnalysis = useMemo(() => {
+    return analyzeReviewSession(
+      Object.entries(answers).map(([questionId, value]) => ({
+        questionId,
+        subject: value.subject,
+        topic: value.topic,
+        correct: value.correct,
+      }))
+    );
+  }, [answers]);
+
+  const accuracyPct = reviewAnalysis.accuracyPct;
 
   const queueTone = useMemo(() => {
     if (questions.length === 0) return "success" as const;
@@ -91,24 +123,39 @@ export default function ReviewPage() {
     return "danger" as const;
   }, [questions.length]);
 
-  const postReviewNextStep = useMemo(
-    () => nextStepLabel(accuracyPct, total),
-    [accuracyPct, total]
-  );
+  const currentReviewReason = useMemo(() => {
+    if (!q) return null;
+    return reviewReasonFor({ question: q, questions, answers });
+  }, [q, questions, answers]);
 
-  const reviewTarget = useMemo(() => {
-    const missed = Object.values(answers).filter((answer) => !answer.correct && answer.topic);
-    if (!missed.length) return null;
+  const repairTopic = reviewAnalysis.primaryRepairTarget?.topic ?? null;
+  const repairSubject = useMemo(() => {
+    if (!repairTopic) return "Reading";
+    const found = Object.values(answers).find(
+      (answer) => (answer.topic?.trim() || "Unknown") === repairTopic
+    );
+    return (found?.subject as "Reading" | "Math") || "Reading";
+  }, [answers, repairTopic]);
 
-    const ranked = [...missed].sort((a, b) => {
-      const aCount = missed.filter((x) => x.topic === a.topic).length;
-      const bCount = missed.filter((x) => x.topic === b.topic).length;
-      if (aCount !== bCount) return bCount - aCount;
-      return a.topic!.localeCompare(b.topic!);
-    });
+  const repairLessonHref = useMemo(() => {
+    if (!repairTopic) return "/lessons";
+    return `/lesson/${encodeURIComponent(repairTopic)}`;
+  }, [repairTopic]);
 
-    return ranked[0];
-  }, [answers]);
+  const repairPracticeHref = useMemo(() => {
+    if (!repairTopic) return "/practice?subject=Reading";
+    return `/practice?subject=${repairSubject}&subskill=${encodeURIComponent(repairTopic)}`;
+  }, [repairTopic, repairSubject]);
+
+  const outcomePill = useMemo(() => {
+    if (reviewAnalysis.outcome === "rebuild") {
+      return { text: "Rebuild", tone: "danger" as const };
+    }
+    if (reviewAnalysis.outcome === "stabilize") {
+      return { text: "Stabilize", tone: "accent" as const };
+    }
+    return { text: "Advance", tone: "success" as const };
+  }, [reviewAnalysis.outcome]);
 
   function optionText(letter: string) {
     if (!q) return "";
@@ -125,6 +172,9 @@ export default function ReviewPage() {
     setSelected(null);
     setLocked(false);
     setFeedback(null);
+    setAiExplain(null);
+    setAiExplainError(null);
+    setAiExplainLoading(false);
     setStartedAt(Date.now());
   }
 
@@ -160,8 +210,8 @@ export default function ReviewPage() {
 
       const list = (data ?? []) as Question[];
       setQuestions(list);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load review queue.");
+    } catch (e: unknown) {
+      setErr(errorMessage(e, "Failed to load review queue."));
     } finally {
       setLoading(false);
     }
@@ -177,7 +227,18 @@ export default function ReviewPage() {
   }
 
   useEffect(() => {
-    loadDuePreview();
+    let cancelled = false;
+
+    const run = async () => {
+      await Promise.resolve();
+      if (!cancelled) await loadDuePreview();
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -202,51 +263,30 @@ export default function ReviewPage() {
         timeTaken,
       };
 
-      const supabase = getSupabase();
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
-      if (!session?.access_token) {
-        throw new Error("You need to sign in.");
-      }
-
-      const res = await fetch("/api/answer-event", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          question_id: q.id,
-          selected_option: selectedOpt,
-          is_review: true,
-          time_taken_seconds: timeTaken,
-        }),
+      const recorded = await recordAnswerEvent({
+        questionId: q.id,
+        selectedOption: selectedOpt,
+        mode: "review",
+        timeTakenSeconds: timeTaken,
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error || "Failed to record review answer.");
-      }
 
       setAnswers((prev) => ({
         ...prev,
         [q.id]: {
-          selected: selectedOpt,
-          correct: !!data.is_correct,
+          selected: recorded.selectedOption,
+          correct: recorded.isCorrect,
+          topic: q.topic ?? null,
           subject: q.subject,
-          topic: q.topic,
         },
       }));
 
       setFeedback({
-        correct: !!data.is_correct,
-        correctOption: String(data.correct_option || q.correct_option).toUpperCase(),
+        correct: recorded.isCorrect,
+        correctOption: recorded.correctOption || String(q.correct_option).toUpperCase(),
       });
       setLocked(true);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to record review answer.");
+    } catch (e: unknown) {
+      setErr(errorMessage(e, "Failed to record review answer."));
     } finally {
       setSaving(false);
     }
@@ -259,8 +299,43 @@ export default function ReviewPage() {
     setErr(null);
 
     try {
-      const supabase = getSupabase();
       const t = lastSubmitRef.current;
+      const recorded = await recordAnswerEvent({
+        questionId: t.questionId,
+        selectedOption: t.selected,
+        mode: "review",
+        timeTakenSeconds: t.timeTaken,
+      });
+
+      const correctOpt = recorded.correctOption || String(q?.correct_option || "-").toUpperCase();
+
+      setAnswers((prev) => ({
+        ...prev,
+        [t.questionId]: {
+          selected: recorded.selectedOption,
+          correct: recorded.isCorrect,
+          topic: q?.topic ?? null,
+          subject: q?.subject ?? "Reading",
+        },
+      }));
+
+      setFeedback({ correct: recorded.isCorrect, correctOption: correctOpt });
+      setLocked(true);
+    } catch (e: unknown) {
+      setErr(errorMessage(e, "Retry failed."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function generateAiExplanation() {
+    if (!q || !selected || aiExplainLoading) return;
+
+    setAiExplainLoading(true);
+    setAiExplainError(null);
+
+    try {
+      const supabase = getSupabase();
       const {
         data: { session },
       } = await supabase.auth.getSession();
@@ -269,43 +344,24 @@ export default function ReviewPage() {
         throw new Error("You need to sign in.");
       }
 
-      const res = await fetch("/api/answer-event", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          question_id: t.questionId,
-          selected_option: t.selected,
-          is_review: true,
-          time_taken_seconds: t.timeTaken,
-        }),
+      const data = await requestQuestionExplanation(session.access_token, {
+        subject: q.subject,
+        subskill: q.topic || null,
+        question_text: q.question_text,
+        option_a: q.option_a,
+        option_b: q.option_b,
+        option_c: q.option_c,
+        option_d: q.option_d,
+        correct_option: q.correct_option.toUpperCase(),
+        selected_option: selected.toUpperCase(),
+        explanation: q.explanation ?? null,
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error || "Retry failed.");
-      }
-
-      const correctOpt = String(data.correct_option || q?.correct_option || "—").toUpperCase();
-
-      setAnswers((prev) => ({
-        ...prev,
-        [t.questionId]: {
-          selected: t.selected,
-          correct: !!data.is_correct,
-          subject: q?.subject ?? "Reading",
-          topic: q?.topic ?? null,
-        },
-      }));
-
-      setFeedback({ correct: !!data.is_correct, correctOption: correctOpt });
-      setLocked(true);
-    } catch (e: any) {
-      setErr(e?.message || "Retry failed.");
+      setAiExplain(data);
+    } catch (e: unknown) {
+      setAiExplainError(errorMessage(e, "Failed to generate AI explanation."));
     } finally {
-      setSaving(false);
+      setAiExplainLoading(false);
     }
   }
 
@@ -326,8 +382,9 @@ export default function ReviewPage() {
   return (
     <main className="min-h-screen">
       <PageHeader
+        label="Recovery workflow"
         title="Review"
-        subtitle="Recovery workflow. Clear due mistakes before you push new practice."
+        subtitle="Clear due mistakes before you push new practice."
         right={
           <button
             onClick={() => router.push("/today")}
@@ -362,12 +419,13 @@ export default function ReviewPage() {
       )}
 
       {!loading && !err && mode === "ready" && (
-        <div className="grid gap-4">
+        <div className="grid gap-6">
           <Card
             title="Recovery queue"
             subtitle="What is due now should be cleared before more forward work."
             right={<Pill text={queueLabel(questions.length)} tone={queueTone} />}
             accent={questions.length > 0}
+            prominence={questions.length > 0 ? "prominent" : "quiet"}
           >
             {questions.length === 0 ? (
               <>
@@ -427,8 +485,8 @@ export default function ReviewPage() {
       {!loading && !err && mode === "in_session" && q && (
         <Card
           title={`Recovery item ${idx + 1} / ${Math.max(total, 1)}`}
-          subtitle={`Accuracy so far: ${accuracyPct}%`}
-          right={<Pill text="Review mode" tone="accent" />}
+          subtitle={`Why this is here: ${currentReviewReason ?? "new mistake"} • Accuracy so far: ${accuracyPct}%`}
+          right={<Pill text={currentReviewReason ?? "Review mode"} tone="accent" />}
           accent
         >
           <div className="text-base font-medium leading-relaxed whitespace-pre-line text-black">
@@ -509,14 +567,17 @@ export default function ReviewPage() {
                 ) : (
                   <div className="mt-3 text-sm text-gray-600">No explanation available yet.</div>
                 )}
-                {q && (
-                  <ReportQuestion
-                    questionId={q.id}
-                    source="ReviewWeb"
-                    subject={q.subject}
-                    subskill={q.topic || undefined}
-                  />
-                )}
+                <QuestionActionBlock
+                  mode="review"
+                  questionId={q.id}
+                  subject={q.subject}
+                  subskill={q.topic || undefined}
+                  onExplain={generateAiExplanation}
+                  aiExplainLoading={aiExplainLoading}
+                  aiExplainError={aiExplainError}
+                  aiExplain={aiExplain}
+                  contextLine={`Review reason: ${currentReviewReason ?? "new mistake"}`}
+                />
               </div>
             )}
           </div>
@@ -527,64 +588,111 @@ export default function ReviewPage() {
         <div className="grid gap-4">
           <Card
             title="Recovery session complete"
-            subtitle="Now decide what should happen next."
-            right={<Pill text={postReviewNextStep} tone={accuracyPct >= 75 ? "success" : accuracyPct >= 50 ? "accent" : "danger"} />}
+            subtitle="Use the result to choose the exact next repair step."
+            right={<Pill text={outcomePill.text} tone={outcomePill.tone} />}
             accent
           >
-            <div className="grid gap-4 sm:grid-cols-3">
+            <div className="grid gap-4 sm:grid-cols-4">
               <StatBox
                 label="Reviewed"
-                value={`${answeredCount}/${total}`}
-                hint="Answered / queued"
+                value={`${reviewAnalysis.reviewedCount}`}
+                hint="Items completed"
+              />
+              <StatBox
+                label="Correct"
+                value={`${reviewAnalysis.correctCount}`}
+                hint="Recovered items"
+                accent={reviewAnalysis.correctCount > 0}
+              />
+              <StatBox
+                label="Incorrect"
+                value={`${reviewAnalysis.incorrectCount}`}
+                hint="Still unstable"
+                accent={reviewAnalysis.incorrectCount > 0}
               />
               <StatBox
                 label="Accuracy"
-                value={`${accuracyPct}%`}
-                hint="This recovery session"
-                accent={accuracyPct >= 50}
-              />
-              <StatBox
-                label="Next move"
-                value={postReviewNextStep}
-                hint="Based on recovery quality"
+                value={`${reviewAnalysis.accuracyPct}%`}
+                hint="This review session"
+                accent={reviewAnalysis.accuracyPct >= 75}
               />
             </div>
-
-            <div className="mt-5 text-sm text-gray-700">
-              {accuracyPct < 50
-                ? reviewTarget
-                  ? `Recovery was weak. Start repair on ${reviewTarget.topic} before adding broad new practice.`
-                  : "Recovery was weak. Do not just move on. Open the skills map and rebuild the unstable concept."
-                : accuracyPct < 75
-                ? reviewTarget
-                  ? `Recovery was partial. One focused practice set on ${reviewTarget.topic} is the right next step.`
-                  : "Recovery was partial. One focused practice set on the weak area is the right next step."
-                : "Recovery was clean enough. You can safely return to normal forward practice."}
-            </div>
-
-            <div className="mt-5 grid gap-3 sm:grid-cols-3">
-              <PrimaryButton onClick={loadDuePreview}>Check due again</PrimaryButton>
-              {reviewTarget?.topic ? (
-                <>
-                  <SecondaryButton
-                    href={`/lesson/${encodeURIComponent(reviewTarget.topic)}`}
-                  >
-                    Open repair lesson
-                  </SecondaryButton>
-                  <SecondaryButton
-                    href={`/practice?subject=${reviewTarget.subject}&subskill=${encodeURIComponent(
-                      reviewTarget.topic
-                    )}`}
-                  >
-                    Practice missed skill
-                  </SecondaryButton>
-                </>
-              ) : (
-                <>
-                  <SecondaryButton href="/skills">Open skills</SecondaryButton>
-                  <SecondaryButton href="/practice?subject=Reading">Go to practice</SecondaryButton>
-                </>
+            <div className="mt-5 rounded-2xl border border-gray-200 bg-white p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                Session interpretation
+              </div>
+              {reviewAnalysis.outcome === "rebuild" && (
+                <div className="mt-2 text-sm leading-relaxed text-gray-700">
+                  Recovery was weak. Do not just move on. A concept or trap pattern is still unstable and needs targeted repair.
+                </div>
               )}
+              {reviewAnalysis.outcome === "stabilize" && (
+                <div className="mt-2 text-sm leading-relaxed text-gray-700">
+                  Recovery was partial. You are close, but one topic still needs focused reinforcement before forward work becomes efficient.
+                </div>
+              )}
+              {reviewAnalysis.outcome === "advance" && (
+                <div className="mt-2 text-sm leading-relaxed text-gray-700">
+                  Recovery was clean enough. You can return to forward practice, but keep review active so relapse stays under control.
+                </div>
+              )}
+            </div>
+            {repairTopic && (
+              <div className="mt-4 rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
+                  Primary repair target
+                </div>
+                <div className="mt-2 text-lg font-semibold text-black">{repairTopic}</div>
+                <div className="mt-2 text-sm text-gray-700">
+                  Subject: {repairSubject}
+                  {reviewAnalysis.primaryRepairTarget && (
+                    <>
+                      {" "}• Accuracy in this session: {Math.round(reviewAnalysis.primaryRepairTarget.accuracy * 100)}%
+                      {" "}({reviewAnalysis.primaryRepairTarget.correct}/{reviewAnalysis.primaryRepairTarget.total})
+                    </>
+                  )}
+                </div>
+                <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:max-w-2xl">
+                  <PrimaryButton href={repairPracticeHref}>Practice this topic</PrimaryButton>
+                  <SecondaryButton href={repairLessonHref}>Open lesson</SecondaryButton>
+                </div>
+              </div>
+            )}
+            {reviewAnalysis.recoveredTopics.length > 0 && (
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                  Recovered cleanly
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {reviewAnalysis.recoveredTopics.slice(0, 6).map((topic) => (
+                    <Pill
+                      key={topic.topic}
+                      text={`${topic.topic} • ${Math.round(topic.accuracy * 100)}%`}
+                      tone="success"
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+            {reviewAnalysis.failedTopics.length > 1 && (
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                  Other weak topics from this session
+                </div>
+                <div className="mt-3 grid gap-2">
+                  {reviewAnalysis.failedTopics.slice(1, 4).map((topic) => (
+                    <div key={topic.topic} className="text-sm text-gray-700">
+                      <span className="font-semibold">{topic.topic}</span> — {Math.round(topic.accuracy * 100)}% ({topic.correct}/{topic.total})
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <PrimaryButton onClick={loadDuePreview}>Check due again</PrimaryButton>
+              <SecondaryButton href={repairPracticeHref}>Targeted practice</SecondaryButton>
+              <SecondaryButton href="/skills">Open skills</SecondaryButton>
+              <SecondaryButton href="/today">Back to Today</SecondaryButton>
             </div>
           </Card>
         </div>

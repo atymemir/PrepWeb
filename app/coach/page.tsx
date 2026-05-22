@@ -5,6 +5,15 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
+import {
+  confidenceLabel,
+  pct,
+  sortWeakest,
+  pickWeakestAcrossSubjects,
+  stableRows,
+  lowSignalRows,
+  type SkillRow as SharedSkillRow,
+} from "../lib/learningSignals";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Profile = {
@@ -17,14 +26,7 @@ type Profile = {
   current_level: string | null;
 };
 
-type SkillRow = {
-  domain: string;
-  skill: string;
-  subskill: string;
-  attempts: number;
-  correct: number;
-  accuracy: number; // 0..1
-};
+type SkillRow = SharedSkillRow;
 
 type Question = {
   id: string;
@@ -49,29 +51,6 @@ function daysUntil(iso: string | null): number | null {
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const end = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   return Math.round((end - start) / (1000 * 60 * 60 * 24));
-}
-
-function confidenceLabel(n: number): "Low" | "Medium" | "High" {
-  if (n < 6) return "Low";
-  if (n < 15) return "Medium";
-  return "High";
-}
-
-function weaknessScore(row: SkillRow): number {
-  return (row.accuracy ?? 0) + (row.attempts < 6 ? 0.12 : 0);
-}
-
-function sortWeakest(rows: SkillRow[]) {
-  return [...rows].sort((a, b) => {
-    const aScore = weaknessScore(a);
-    const bScore = weaknessScore(b);
-    if (aScore !== bScore) return aScore - bScore;
-    return b.attempts - a.attempts;
-  });
-}
-
-function pct(n: number | null | undefined) {
-  return Math.round((n ?? 0) * 100);
 }
 
 function coachHeadline(args: {
@@ -142,28 +121,16 @@ export default function CoachPage() {
   const nickname = profile?.nickname?.trim() || "Student";
   const dleft = useMemo(() => daysUntil(profile?.exam_date ?? null), [profile]);
 
-  const weakestReading = useMemo(() => sortWeakest(skillsReading)[0] ?? null, [skillsReading]);
-  const weakestMath = useMemo(() => sortWeakest(skillsMath)[0] ?? null, [skillsMath]);
-
   const weakestOverall = useMemo(() => {
-    if (!weakestReading && !weakestMath) return null;
-    if (!weakestReading) return { subject: "Math" as const, row: weakestMath! };
-    if (!weakestMath) return { subject: "Reading" as const, row: weakestReading };
-
-    const rScore = weaknessScore(weakestReading);
-    const mScore = weaknessScore(weakestMath);
-
-    return rScore <= mScore
-      ? { subject: "Reading" as const, row: weakestReading }
-      : { subject: "Math" as const, row: weakestMath };
-  }, [weakestReading, weakestMath]);
+    return pickWeakestAcrossSubjects(skillsReading, skillsMath);
+  }, [skillsReading, skillsMath]);
 
   const stableWeakAreas = useMemo(() => {
-    return sortWeakest([...skillsReading, ...skillsMath]).filter((r) => r.attempts >= 6).slice(0, 3);
+    return sortWeakest(stableRows([...skillsReading, ...skillsMath])).slice(0, 3);
   }, [skillsReading, skillsMath]);
 
   const lowSignalCount = useMemo(() => {
-    return [...skillsReading, ...skillsMath].filter((r) => r.attempts < 6).length;
+    return lowSignalRows([...skillsReading, ...skillsMath]).length;
   }, [skillsReading, skillsMath]);
 
   const myLeague = useMemo(() => {
@@ -418,8 +385,9 @@ export default function CoachPage() {
   return (
     <main className="min-h-screen">
       <PageHeader
+        label="Strategist layer"
         title="Coach"
-        subtitle={`Personal strategist for ${nickname}. Use this page to understand what matters now.`}
+        subtitle={`Personal analysis for ${nickname}. Understand what matters now.`}
         right={<Pill text="Strategist" tone="accent" />}
       />
 

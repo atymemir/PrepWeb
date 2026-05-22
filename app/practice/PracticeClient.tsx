@@ -4,8 +4,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { getSupabase } from "../lib/supabase";
+import { confidenceLabel } from "../lib/learningSignals";
+import { analyzeReviewSession } from "../lib/sessionAnalysis";
+import { requestQuestionExplanation, type AiExplanation } from "../lib/questionExplanation";
+import { errorMessage } from "../lib/errors";
+import { recordAnswerEvent } from "../lib/answerEvents";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
-import ReportQuestion from "../components/ReportQuestion";
+import QuestionActionBlock from "../components/QuestionActionBlock";
 
 type Question = {
   id: string;
@@ -27,22 +32,11 @@ type AnswerInsert = {
   is_correct: boolean;
   is_review: boolean;
   time_taken_seconds: number;
-};
-
-type AiExplanation = {
-  why_correct: string;
-  why_user_missed: string;
-  trap_pattern: string;
-  how_to_avoid: string;
+  subject: string;
+  topic: string | null;
 };
 
 type Mode = "setup" | "in_session" | "done";
-
-function confidenceLabel(n: number): "Low" | "Medium" | "High" {
-  if (n < 4) return "Low";
-  if (n < 9) return "Medium";
-  return "High";
-}
 
 export default function PracticeClient() {
   const router = useRouter();
@@ -69,45 +63,61 @@ export default function PracticeClient() {
   const [aiExplainError, setAiExplainError] = useState<string | null>(null);
   const [aiExplain, setAiExplain] = useState<AiExplanation | null>(null);
 
-  const [startedAt, setStartedAt] = useState<number>(Date.now());
+  const [startedAt, setStartedAt] = useState<number>(() => Date.now());
   const [answers, setAnswers] = useState<Record<string, AnswerInsert>>({});
   const [saving, setSaving] = useState(false);
 
   const q = questions[idx];
   const total = questions.length;
 
-  const answeredCount = Object.keys(answers).length;
-
-  const correctCount = useMemo(() => {
-    return Object.values(answers).filter((a) => a.is_correct).length;
+  const sessionAnalysis = useMemo(() => {
+    return analyzeReviewSession(
+      Object.entries(answers).map(([questionId, value]) => ({
+        questionId,
+        subject: value.subject,
+        topic: value.topic,
+        correct: value.is_correct,
+      }))
+    );
   }, [answers]);
 
-  const incorrectCount = useMemo(() => answeredCount - correctCount, [answeredCount, correctCount]);
-
-  const accuracyPct = useMemo(() => {
-    return answeredCount ? Math.round((correctCount / answeredCount) * 100) : 0;
-  }, [answeredCount, correctCount]);
-
-  const finalPct = useMemo(() => {
-    return total ? Math.round((correctCount / total) * 100) : 0;
-  }, [correctCount, total]);
+  const answeredCount = sessionAnalysis.reviewedCount;
+  const correctCount = sessionAnalysis.correctCount;
+  const incorrectCount = sessionAnalysis.incorrectCount;
+  const accuracyPct = sessionAnalysis.accuracyPct;
+  const repairTopic = sessionAnalysis.primaryRepairTarget?.topic ?? null;
+  const repairSubject = useMemo(() => {
+    if (!repairTopic) return subject;
+    const found = Object.values(answers).find(
+      (answer) => (answer.topic?.trim() || "Unknown") === repairTopic
+    );
+    return (found?.subject as "Reading" | "Math") || subject;
+  }, [answers, repairTopic, subject]);
+  const repairPracticeHref = repairTopic
+    ? `/practice?subject=${repairSubject}&subskill=${encodeURIComponent(repairTopic)}`
+    : `/practice?subject=${subject}`;
+  const repairLessonHref = repairTopic ? `/lesson/${encodeURIComponent(repairTopic)}` : "/lessons";
 
   const sessionOutcome = useMemo(() => {
     if (mode !== "done" || total === 0) return null;
 
-    if (finalPct < 50) {
+    if (sessionAnalysis.outcome === "rebuild") {
       return {
         title: "Weak signal",
         tone: "danger" as const,
-        note: "Do not move on blindly. Open the lesson or skill map and repair the weak area first.",
+        note: repairTopic
+          ? `Do not move on blindly. Repair ${repairTopic}, then test it with a targeted set.`
+          : "Do not move on blindly. Open the skills map and repair the weak area first.",
       };
     }
 
-    if (finalPct < 75) {
+    if (sessionAnalysis.outcome === "stabilize") {
       return {
         title: "Partial control",
         tone: "accent" as const,
-        note: "You are close, but not stable yet. One more focused set on the same weakness is the right next move.",
+        note: repairTopic
+          ? `You are close, but ${repairTopic} still needs focused reinforcement.`
+          : "You are close, but not stable yet. One more focused set is the right next move.",
       };
     }
 
@@ -116,7 +126,7 @@ export default function PracticeClient() {
       tone: "success" as const,
       note: "This set was clean enough. Move forward, but let review catch any mistakes that still need recovery.",
     };
-  }, [mode, total, finalPct]);
+  }, [mode, total, sessionAnalysis.outcome, repairTopic]);
 
   function optionText(letter: string) {
     if (!q) return "";
@@ -142,18 +152,6 @@ export default function PracticeClient() {
     setAiExplainError(null);
     setAiExplainLoading(false);
     setStartedAt(Date.now());
-  }
-
-  function resetSessionState() {
-    setIdx(0);
-    setAnswers({});
-    resetQuestionUI();
-    setMode("setup");
-    setDoneFalse();
-  }
-
-  function setDoneFalse() {
-    if (mode === "done") setMode("setup");
   }
 
   function pick(letter: string) {
@@ -193,8 +191,8 @@ export default function PracticeClient() {
       setAnswers({});
       resetQuestionUI();
       setMode("setup");
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load practice.");
+    } catch (e: unknown) {
+      setErr(errorMessage(e, "Failed to load practice."));
       setQuestions([]);
     } finally {
       setLoading(false);
@@ -202,7 +200,18 @@ export default function PracticeClient() {
   }
 
   useEffect(() => {
-    ensureAuthAndLoad();
+    let cancelled = false;
+
+    const run = async () => {
+      await Promise.resolve();
+      if (!cancelled) await ensureAuthAndLoad();
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subject, subskill]);
 
@@ -222,53 +231,34 @@ export default function PracticeClient() {
     try {
       const timeTaken = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
       const selectedOpt = selected.toUpperCase();
-      const supabase = getSupabase();
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
-      if (!session?.access_token) {
-        throw new Error("You need to sign in.");
-      }
-
-      const res = await fetch("/api/answer-event", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          question_id: q.id,
-          selected_option: selectedOpt,
-          is_review: false,
-          time_taken_seconds: timeTaken,
-        }),
+      const recorded = await recordAnswerEvent({
+        questionId: q.id,
+        selectedOption: selectedOpt,
+        mode: "practice",
+        timeTakenSeconds: timeTaken,
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error || "Failed to record practice answer.");
-      }
 
       setAnswers((prev) => ({
         ...prev,
         [q.id]: {
           question_id: q.id,
-          selected_option: selectedOpt,
-          is_correct: !!data.is_correct,
+          selected_option: recorded.selectedOption,
+          is_correct: recorded.isCorrect,
           is_review: false,
           time_taken_seconds: timeTaken,
+          subject: q.subject || subject,
+          topic: q.topic ?? (subskill || null),
         },
       }));
 
       setFeedback({
-        correct: !!data.is_correct,
-        correctOption: String(data.correct_option || q.correct_option).toUpperCase(),
+        correct: recorded.isCorrect,
+        correctOption: recorded.correctOption || String(q.correct_option).toUpperCase(),
       });
 
       setLocked(true);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to record practice answer.");
+    } catch (e: unknown) {
+      setErr(errorMessage(e, "Failed to record practice answer."));
     } finally {
       setSaving(false);
     }
@@ -288,32 +278,21 @@ export default function PracticeClient() {
         throw new Error("You need to sign in.");
       }
 
-      const res = await fetch("/api/practice-explain", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          subject,
-          subskill: subskill || q.topic || null,
-          question_text: q.question_text,
-          option_a: q.option_a,
-          option_b: q.option_b,
-          option_c: q.option_c,
-          option_d: q.option_d,
-          correct_option: q.correct_option.toUpperCase(),
-          selected_option: selected.toUpperCase(),
-          explanation: q.explanation ?? null,
-        }),
+      const data = await requestQuestionExplanation(session.access_token, {
+        subject,
+        subskill: subskill || q.topic || null,
+        question_text: q.question_text,
+        option_a: q.option_a,
+        option_b: q.option_b,
+        option_c: q.option_c,
+        option_d: q.option_d,
+        correct_option: q.correct_option.toUpperCase(),
+        selected_option: selected.toUpperCase(),
+        explanation: q.explanation ?? null,
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error || "Failed to generate AI explanation.");
-      }
       setAiExplain(data);
-    } catch (e: any) {
-      setAiExplainError(e?.message || "Failed to generate AI explanation.");
+    } catch (e: unknown) {
+      setAiExplainError(errorMessage(e, "Failed to generate AI explanation."));
     } finally {
       setAiExplainLoading(false);
     }
@@ -339,10 +318,11 @@ export default function PracticeClient() {
   return (
     <main className="min-h-screen">
       <PageHeader
+        label={subskill ? "Targeted training" : "Fresh practice"}
         title="Practice"
         subtitle={
           subskill
-            ? `${subject} • targeted on ${subskill}`
+            ? `${subject} • focused on ${subskill}`
             : `${subject} • focused 12-question session`
         }
         right={
@@ -524,58 +504,17 @@ export default function PracticeClient() {
                     </div>
                   )}
 
-                  <div className="mt-4 flex flex-wrap gap-3">
-                    <button
-                      onClick={generateAiExplanation}
-                      disabled={aiExplainLoading}
-                      className="rounded-lg border border-[#c7dbff] bg-[#eef4ff] px-3 py-2 text-sm font-semibold text-[#004aad] transition hover:bg-[#dfeeff] disabled:opacity-60"
-                    >
-                      {aiExplainLoading
-                        ? "Generating AI explanation..."
-                        : aiExplain
-                        ? "Refresh AI explanation"
-                        : "Explain with AI"}
-                    </button>
-                  </div>
-
-                  {aiExplainError && (
-                    <div className="mt-3 text-sm text-red-600">{aiExplainError}</div>
-                  )}
-
-                  {aiExplain && (
-                    <div className="mt-4 rounded-xl border border-[#c7dbff] bg-[#f6faff] p-4">
-                      <div className="text-sm font-semibold text-[#004aad]">AI breakdown</div>
-                      <div className="mt-3 text-sm text-gray-800">
-                        <span className="font-semibold">Why the correct answer works:</span>{" "}
-                        {aiExplain.why_correct}
-                      </div>
-                      <div className="mt-3 text-sm text-gray-800">
-                        <span className="font-semibold">Why your choice missed:</span>{" "}
-                        {aiExplain.why_user_missed}
-                      </div>
-                      <div className="mt-3 text-sm text-gray-800">
-                        <span className="font-semibold">Trap pattern:</span>{" "}
-                        {aiExplain.trap_pattern}
-                      </div>
-                      <div className="mt-3 text-sm text-gray-800">
-                        <span className="font-semibold">How to avoid it next time:</span>{" "}
-                        {aiExplain.how_to_avoid}
-                      </div>
-                    </div>
-                  )}
-
-                  {q && (
-                    <ReportQuestion
-                      questionId={q.id}
-                      source="PracticeWeb"
-                      subject={subject}
-                      subskill={subskill || q.topic || undefined}
-                    />
-                  )}
-
-                  <div className="mt-4 text-xs text-gray-500">
-                    Practice generates forward signal. Review handles later recovery.
-                  </div>
+                  <QuestionActionBlock
+                    mode="practice"
+                    questionId={q.id}
+                    subject={subject}
+                    subskill={subskill || q.topic || undefined}
+                    onExplain={generateAiExplanation}
+                    aiExplainLoading={aiExplainLoading}
+                    aiExplainError={aiExplainError}
+                    aiExplain={aiExplain}
+                    footerNote="Practice generates forward signal. Review handles later recovery."
+                  />
                 </div>
               )}
             </div>
@@ -597,32 +536,72 @@ export default function PracticeClient() {
             subtitle="Your answers were recorded as you worked. Decide the next best move."
             right={sessionOutcome ? <Pill text={sessionOutcome.title} tone={sessionOutcome.tone} /> : null}
             accent
+            prominence="prominent"
           >
-            <div className="grid gap-4 sm:grid-cols-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <StatBox
                 label="Score"
                 value={`${correctCount}/${total}`}
                 hint="Correct / total"
                 accent={accuracyPct >= 50}
+                size={accuracyPct >= 50 ? "large" : "default"}
               />
               <StatBox
                 label="Accuracy"
-                value={`${finalPct}%`}
+                value={`${sessionAnalysis.accuracyPct}%`}
                 hint="This practice session"
                 accent={accuracyPct >= 75}
+                size={accuracyPct >= 75 ? "large" : "default"}
               />
               <StatBox label="Incorrect" value={`${incorrectCount}`} hint="Likely to feed review" />
               <StatBox label="Signal" value={confidenceLabel(total)} hint="Based on session size" />
             </div>
 
             {sessionOutcome && (
-              <div className="mt-5 text-sm leading-relaxed text-gray-700">{sessionOutcome.note}</div>
+              <div className={`mt-6 rounded-2xl border-2 p-5 ${
+                sessionOutcome.tone === "danger" 
+                  ? "border-red-300 bg-red-50" 
+                  : sessionOutcome.tone === "accent"
+                  ? "border-[#c7dbff] bg-[#f6faff]"
+                  : "border-green-300 bg-green-50"
+              }`}>
+                <div className={`text-sm font-semibold ${
+                  sessionOutcome.tone === "danger"
+                    ? "text-red-700"
+                    : sessionOutcome.tone === "accent"
+                    ? "text-[#004aad]"
+                    : "text-green-700"
+                }`}>
+                  {sessionOutcome.title}
+                </div>
+                <div className="mt-2 text-sm leading-relaxed text-gray-700">{sessionOutcome.note}</div>
+              </div>
             )}
 
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <PrimaryButton onClick={ensureAuthAndLoad}>Run again</PrimaryButton>
+            {repairTopic && (
+              <div className="mt-5 rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
+                <div className="label label-accent mb-2">Primary repair target</div>
+                <div className="mt-1 text-lg font-semibold text-black">{repairTopic}</div>
+                <div className="mt-2 text-sm text-gray-700">
+                  Subject: {repairSubject}
+                  {sessionAnalysis.primaryRepairTarget && (
+                    <>
+                      {" "}• Accuracy in this session: {Math.round(sessionAnalysis.primaryRepairTarget.accuracy * 100)}%
+                      {" "}({sessionAnalysis.primaryRepairTarget.correct}/{sessionAnalysis.primaryRepairTarget.total})
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <PrimaryButton href={repairTopic ? repairPracticeHref : undefined} onClick={repairTopic ? undefined : ensureAuthAndLoad}>
+                {repairTopic ? "Practice weak topic" : "Run again"}
+              </PrimaryButton>
               <SecondaryButton href="/skills">Open skills</SecondaryButton>
-              <SecondaryButton href="/review">Open review</SecondaryButton>
+              <SecondaryButton href={repairTopic ? repairLessonHref : "/review"}>
+                {repairTopic ? "Open lesson" : "Open review"}
+              </SecondaryButton>
               <SecondaryButton href="/today">Back to Today</SecondaryButton>
             </div>
           </Card>

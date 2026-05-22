@@ -4,16 +4,16 @@ export const dynamic = 'force-dynamic';
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
+import {
+  confidenceLabel,
+  pct,
+  sortWeakest,
+  weaknessScore,
+  type SkillRow as SharedSkillRow,
+} from "../lib/learningSignals";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
-type Row = {
-  domain: string;
-  skill: string;
-  subskill: string;
-  attempts: number;
-  correct: number;
-  accuracy: number; // 0..1
-};
+type Row = SharedSkillRow;
 
 type DomainSummary = {
   domain: string;
@@ -21,29 +21,6 @@ type DomainSummary = {
   avgAccuracy: number;
   weakest: Row | null;
 };
-
-function confidenceLabel(n: number): "Low" | "Medium" | "High" {
-  if (n < 6) return "Low";
-  if (n < 15) return "Medium";
-  return "High";
-}
-
-function pct(x: number | null | undefined): number {
-  return Math.round((x ?? 0) * 100);
-}
-
-function weaknessScore(row: Row): number {
-  return (row.accuracy ?? 0) + (row.attempts < 6 ? 0.12 : 0);
-}
-
-function sortWeakest(rows: Row[]) {
-  return [...rows].sort((a, b) => {
-    const aScore = weaknessScore(a);
-    const bScore = weaknessScore(b);
-    if (aScore !== bScore) return aScore - bScore;
-    return b.attempts - a.attempts;
-  });
-}
 
 function groupByDomain(rows: Row[]) {
   const map = new Map<string, Row[]>();
@@ -156,8 +133,9 @@ export default function SkillsPage() {
   return (
     <main className="min-h-screen">
       <PageHeader
+        label="Diagnostic workspace"
         title="Skills"
-        subtitle="Diagnostic workspace. Find the weakest signal, repair it, then re-test it."
+        subtitle="Find the weakest signal, repair it, then re-test it."
         right={
           <div className="flex gap-2">
             <button

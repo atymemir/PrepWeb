@@ -3,9 +3,9 @@ export const dynamic = 'force-dynamic';
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
 import { LESSONS } from "../data/lessons";
+import { sortWeakest, type SkillRow } from "../lib/learningSignals";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
 
 type Lesson = {
@@ -19,31 +19,7 @@ type Lesson = {
   miniExample: { prompt: string; answer: string };
 };
 
-type SkillRow = {
-  domain: string;
-  skill: string;
-  subskill: string;
-  attempts: number;
-  correct: number;
-  accuracy: number; // 0..1
-};
-
-function weaknessScore(row: SkillRow): number {
-  return (row.accuracy ?? 0) + (row.attempts < 6 ? 0.12 : 0);
-}
-
-function sortWeakest(rows: SkillRow[]) {
-  return [...rows].sort((a, b) => {
-    const aScore = weaknessScore(a);
-    const bScore = weaknessScore(b);
-    if (aScore !== bScore) return aScore - bScore;
-    return b.attempts - a.attempts;
-  });
-}
-
 export default function LessonsPage() {
-  const router = useRouter();
-
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [subject, setSubject] = useState<"All" | "Reading" | "Math">("All");
