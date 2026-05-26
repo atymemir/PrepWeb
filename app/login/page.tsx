@@ -16,6 +16,7 @@ export default function LoginPage() {
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [msg, setMsg] = useState<string | null>(null);
+  const [nextAfterAuth, setNextAfterAuth] = useState("/today");
 
   useEffect(() => {
     let mounted = true;
@@ -42,6 +43,18 @@ export default function LoginPage() {
     };
   }, [router]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("mode") === "signup") {
+      setMode("signup");
+    }
+    const nextParam = params.get("next");
+    if (nextParam && nextParam.startsWith("/")) {
+      setNextAfterAuth(nextParam);
+    }
+  }, []);
+
   async function signIn() {
     setBusy(true);
     setMsg(null);
@@ -53,7 +66,7 @@ export default function LoginPage() {
         setMsg(error.message);
         return;
       }
-      router.push("/today");
+      router.push(nextAfterAuth);
     } catch {
       setMsg("Something went wrong. Try again.");
     } finally {
@@ -104,42 +117,33 @@ export default function LoginPage() {
           </h1>
 
           <p className="mt-3 max-w-xl text-sm leading-relaxed text-gray-600">
-            Your account keeps practice, review, skill recovery, and profile settings in one place.
-            No fake projections. Just the system and your actual work.
+            Your account keeps practice, review, mastery movement, and history in one loop.
           </p>
 
-          <div className="mt-6 grid gap-4 sm:grid-cols-3">
-            <div className="rounded-2xl border border-gray-200 p-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                Practice
-              </div>
-              <div className="mt-2 text-sm text-gray-700">
-                Short 12-question sessions with cleaner pacing.
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-gray-200 p-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                Review
-              </div>
-              <div className="mt-2 text-sm text-gray-700">
-                Mistakes come back when they should.
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-gray-200 p-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                Skills
-              </div>
-              <div className="mt-2 text-sm text-gray-700">
-                Weak subskills become visible and actionable.
-              </div>
+          <div className="mt-6 rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">First action after login</div>
+            <div className="mt-2 text-sm font-semibold text-[#0f172a]">Open Today and run one full practice block.</div>
+            <div className="mt-1 text-xs text-gray-600">
+              The system needs one completed block to start routing recovery and mastery.
             </div>
           </div>
 
-          <div className="mt-6 text-xs text-gray-500">
-            New here? Create an account in under a minute.
+          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+            <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">1. Practice</div>
+              <div className="mt-1 text-sm text-gray-700">Generate signal</div>
+            </div>
+            <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">2. Review</div>
+              <div className="mt-1 text-sm text-gray-700">Clear due debt</div>
+            </div>
+            <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">3. Skills</div>
+              <div className="mt-1 text-sm text-gray-700">Target one weak subtopic</div>
+            </div>
           </div>
+
+          <div className="mt-6 text-xs text-gray-500">New here? Create an account in under a minute.</div>
         </section>
 
         <section className="rounded-3xl border border-gray-200 bg-white p-6 sm:p-8">

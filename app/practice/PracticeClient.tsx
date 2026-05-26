@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
-import { analyzeReviewSession } from "../lib/sessionAnalysis";
+import { analyzeReviewSession, type SessionAnalysis } from "../lib/sessionAnalysis";
 import { requestQuestionExplanation, type AiExplanation } from "../lib/questionExplanation";
 import { errorMessage } from "../lib/errors";
 import { recordAnswerEvent } from "../lib/answerEvents";
@@ -23,6 +23,17 @@ import {
   recordDurableEngagementSession,
 } from "../lib/engagementDurable";
 import { recordStudySession } from "../lib/sessionHistory";
+import {
+  focusedLessonHref,
+  focusedPracticeHref,
+  masteryFor,
+  masteryTone,
+  movementFor,
+  movementTone,
+  type MasteryState,
+  type MovementState,
+} from "../lib/mastery";
+import { normalizePlanTier, tierDefinition, type PlanTier } from "../lib/productTiers";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 import QuestionActionBlock from "../components/QuestionActionBlock";
 import { SessionPayoffCard } from "../components/EngagementSystem";
@@ -61,6 +72,19 @@ type ScoreBand = {
   center: number;
   confidence: "Low" | "Medium" | "High";
   signalAnswers: number;
+};
+
+type SeenQuestionRow = {
+  question_id: string;
+};
+
+type MasteryProbe = {
+  subject: "Reading" | "Math";
+  topic: string;
+  attempts: number;
+  accuracyPct: number;
+  mastery: MasteryState;
+  movement: MovementState;
 };
 
 const PRACTICE_MODES: Array<{ key: PracticeMode; label: string; note: string }> = [
@@ -165,12 +189,22 @@ function estimateScoreBand(args: {
   return { low, high, center, confidence, signalAnswers };
 }
 
+function isPracticePoolRpcUnavailable(error: { code?: string; message?: string }): boolean {
+  const msg = String(error?.message || "").toLowerCase();
+  return (
+    error?.code === "PGRST202" ||
+    msg.includes("get_my_seen_practice_questions") ||
+    msg.includes("practice_fresh_seen")
+  );
+}
+
 export default function PracticeClient() {
   const router = useRouter();
   const sp = useSearchParams();
 
   const subject = (sp.get("subject") || "Reading") as "Reading" | "Math" | "Combined";
   const subskill = sp.get("subskill") || "";
+  const includeSeen = sp.get("revisit") === "1";
   const limit = 12;
 
   const [mode, setMode] = useState<Mode>("setup");
@@ -203,17 +237,29 @@ export default function PracticeClient() {
   const [sessionClientId, setSessionClientId] = useState<string>(() => createClientSessionId());
   const [engagementNotice, setEngagementNotice] = useState<string | null>(null);
   const [timingNotice, setTimingNotice] = useState<string | null>(null);
+  const [poolNotice, setPoolNotice] = useState<string | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
 
   const [questionSecondsLeft, setQuestionSecondsLeft] = useState<number | null>(null);
   const [examSecondsLeft, setExamSecondsLeft] = useState<number | null>(null);
   const [examDraftAnswers, setExamDraftAnswers] = useState<Record<string, string>>({});
   const [examMarked, setExamMarked] = useState<Record<string, boolean>>({});
+  const [examNavFilter, setExamNavFilter] = useState<"all" | "marked" | "unanswered">("all");
+  const [examSubmitPanelOpen, setExamSubmitPanelOpen] = useState(false);
   const [examStartedAtMs, setExamStartedAtMs] = useState<number>(() => Date.now());
   const [historySessionId, setHistorySessionId] = useState<string | null>(null);
+  const [baselineLastSession, setBaselineLastSession] = useState<EngagementIdentity["lastSession"] | null>(null);
+  const [finalAnalysis, setFinalAnalysis] = useState<SessionAnalysis | null>(null);
+  const [postSessionDueCount, setPostSessionDueCount] = useState<number | null>(null);
+  const [postSessionMasteryProbe, setPostSessionMasteryProbe] = useState<MasteryProbe | null>(null);
+  const [postSessionSignalsNotice, setPostSessionSignalsNotice] = useState<string | null>(null);
+  const [examNavigatorOpen, setExamNavigatorOpen] = useState(false);
+  const [planTier, setPlanTier] = useState<PlanTier>("free");
+  const [planNotice, setPlanNotice] = useState<string | null>(null);
 
   const q = questions[idx];
   const total = questions.length;
+  const tier = useMemo(() => tierDefinition(planTier), [planTier]);
 
   const sessionAnalysis = useMemo(() => {
     return analyzeReviewSession(
@@ -226,15 +272,31 @@ export default function PracticeClient() {
     );
   }, [answers]);
 
-  const answeredCount = sessionAnalysis.reviewedCount;
-  const correctCount = sessionAnalysis.correctCount;
-  const accuracyPct = sessionAnalysis.accuracyPct;
+  const analysis = finalAnalysis ?? sessionAnalysis;
+  const answeredCount = analysis.reviewedCount;
+  const correctCount = analysis.correctCount;
+  const accuracyPct = analysis.accuracyPct;
 
   const examAnsweredCount = useMemo(() => Object.keys(examDraftAnswers).length, [examDraftAnswers]);
   const examMarkedCount = useMemo(
     () => Object.values(examMarked).filter(Boolean).length,
     [examMarked]
   );
+  const examUnansweredCount = useMemo(
+    () => Math.max(total - examAnsweredCount, 0),
+    [examAnsweredCount, total]
+  );
+
+  const examVisibleQuestionIndices = useMemo(() => {
+    return questions
+      .map((question, qIdx) => ({ question, qIdx }))
+      .filter(({ question }) => {
+        if (examNavFilter === "all") return true;
+        if (examNavFilter === "marked") return !!examMarked[question.id];
+        return !examDraftAnswers[question.id];
+      })
+      .map((row) => row.qIdx);
+  }, [questions, examNavFilter, examMarked, examDraftAnswers]);
 
   const scoreBand = useMemo(() => {
     return estimateScoreBand({
@@ -245,7 +307,7 @@ export default function PracticeClient() {
     });
   }, [identity, answeredCount, correctCount]);
 
-  const repairTopic = sessionAnalysis.primaryRepairTarget?.topic ?? null;
+  const repairTopic = analysis.primaryRepairTarget?.topic ?? null;
   const repairSubject = useMemo(() => {
     if (!repairTopic) return subject === "Combined" ? "Reading" : subject;
     const found = Object.values(answers).find(
@@ -255,16 +317,16 @@ export default function PracticeClient() {
   }, [answers, repairTopic, subject]);
 
   const repairPracticeHref = repairTopic
-    ? `/practice?subject=${repairSubject}&subskill=${encodeURIComponent(repairTopic)}`
+    ? focusedPracticeHref(repairSubject, repairTopic, true)
     : `/practice?subject=${subject}`;
-  const repairLessonHref = repairTopic ? `/lesson/${encodeURIComponent(repairTopic)}` : "/lessons";
+  const repairLessonHref = repairTopic ? focusedLessonHref(repairTopic) : "/lessons";
   const hasMathTools = subject === "Math" || subject === "Combined" || q?.subject === "Math";
   const toolsTopicHint = q?.topic || subskill || (subject === "Combined" ? q?.subject || "Math" : subject);
 
   const sessionOutcome = useMemo(() => {
     if (mode !== "done" || total === 0) return null;
 
-    if (sessionAnalysis.outcome === "rebuild") {
+    if (analysis.outcome === "rebuild") {
       return {
         title: "Weak signal",
         tone: "danger" as const,
@@ -274,7 +336,7 @@ export default function PracticeClient() {
       };
     }
 
-    if (sessionAnalysis.outcome === "stabilize") {
+    if (analysis.outcome === "stabilize") {
       return {
         title: "Partial control",
         tone: "accent" as const,
@@ -289,7 +351,66 @@ export default function PracticeClient() {
       tone: "success" as const,
       note: "This set was clean enough. Move forward, but let review catch any mistakes that still need recovery.",
     };
-  }, [mode, total, sessionAnalysis.outcome, repairTopic]);
+  }, [mode, total, analysis.outcome, repairTopic]);
+
+  const postSessionRoute = useMemo(() => {
+    if (practiceMode === "exam") {
+      if ((postSessionDueCount ?? 0) > 0) {
+        return {
+          primaryLabel: "Clear review queue",
+          primaryHref: "/review",
+          secondaryLabel: repairTopic ? "Run targeted repair" : "Replay exam mode",
+          secondaryHref: repairTopic ? repairPracticeHref : `/practice?subject=${subject}&mode=exam`,
+        };
+      }
+      if (repairTopic) {
+        return {
+          primaryLabel: "Run targeted repair",
+          primaryHref: repairPracticeHref,
+          secondaryLabel: "Open review queue",
+          secondaryHref: "/review",
+        };
+      }
+      return {
+        primaryLabel: "Open review queue",
+        primaryHref: "/review",
+        secondaryLabel: "Run next practice block",
+        secondaryHref: `/practice?subject=${subject}`,
+      };
+    }
+
+    if (repairTopic) {
+      if ((postSessionDueCount ?? 0) > 0) {
+        return {
+          primaryLabel: "Clear review queue",
+          primaryHref: "/review",
+          secondaryLabel: "Run targeted repair",
+          secondaryHref: repairPracticeHref,
+        };
+      }
+      return {
+        primaryLabel: "Run targeted repair",
+        primaryHref: repairPracticeHref,
+        secondaryLabel: "Open lesson",
+        secondaryHref: repairLessonHref,
+      };
+    }
+
+    return {
+      primaryLabel: "Run next set",
+      primaryHref: "",
+      secondaryLabel: "Open review",
+      secondaryHref: "/review",
+    };
+  }, [practiceMode, postSessionDueCount, repairTopic, repairPracticeHref, repairLessonHref, subject]);
+
+  const executionDelta = useMemo(() => {
+    if (!baselineLastSession) return null;
+    return {
+      accuracyDelta: analysis.accuracyPct - baselineLastSession.accuracyPct,
+      xpDelta: (sessionPayoff?.totalAwarded ?? momentum.sessionXp) - baselineLastSession.xpAwarded,
+    };
+  }, [baselineLastSession, analysis.accuracyPct, sessionPayoff?.totalAwarded, momentum.sessionXp]);
 
   function optionText(letter: string) {
     if (!q) return "";
@@ -366,48 +487,155 @@ export default function PracticeClient() {
       }
 
       try {
+        const profileRes = await supabase
+          .from("profiles")
+          .select("plan_tier")
+          .eq("id", session.user.id)
+          .single();
+        if (!profileRes.error) {
+          const resolved = normalizePlanTier((profileRes.data as { plan_tier?: string | null })?.plan_tier ?? "free");
+          setPlanTier(resolved);
+          if (practiceMode === "exam" && !tierDefinition(resolved).limits.examMode) {
+            setPracticeMode("timed");
+            setPlanNotice("Exam mode is available on Pro and Ultimate. Switched to Timed mode.");
+          } else {
+            setPlanNotice(null);
+          }
+        } else {
+          setPlanTier("free");
+          setPlanNotice(null);
+        }
+      } catch {
+        setPlanTier("free");
+        setPlanNotice(null);
+      }
+
+      try {
         const snapshot = await getDurableEngagementSnapshot();
         setIdentity(snapshot.identity);
         setIdentityStatus(snapshot.status);
+        setBaselineLastSession(snapshot.identity.lastSession);
         setEngagementNotice(null);
       } catch (engagementErr: unknown) {
         setIdentity(null);
         setIdentityStatus(null);
+        setBaselineLastSession(null);
         setEngagementNotice(errorMessage(engagementErr, "Durable engagement backend is unavailable."));
       }
+      setPoolNotice(null);
 
-      const { data, error } = await supabase.rpc("get_practice_questions", {
-        p_subject: subject === "Combined" ? "Reading" : subject,
-        p_subskill: subject === "Combined" ? null : subskill,
-        p_limit: subject === "Combined" ? Math.ceil(limit / 2) : limit,
-      });
+      const usesFreshPool = !subskill && !includeSeen;
+      const fetchLimit = usesFreshPool ? Math.max(limit * 6, 72) : limit;
 
-      if (error) throw new Error(error.message);
+      const fetchQuestions = async (args: {
+        targetSubject: "Reading" | "Math";
+        targetSubskill: string | null;
+        targetLimit: number;
+      }) => {
+        const { data, error } = await supabase.rpc("get_practice_questions", {
+          p_subject: args.targetSubject,
+          p_subskill: args.targetSubskill,
+          p_limit: args.targetLimit,
+        });
+        if (error) throw new Error(error.message);
+        return (data ?? []) as Question[];
+      };
 
-      let list = (data ?? []) as Question[];
-
-      if (subject === "Combined") {
-        const { data: mathData, error: mathError } = await supabase.rpc("get_practice_questions", {
-          p_subject: "Math",
-          p_subskill: null,
-          p_limit: Math.floor(limit / 2),
+      const fetchSeenQuestionIds = async (targetSubject: "Reading" | "Math") => {
+        const { data, error } = await supabase.rpc("get_my_seen_practice_questions", {
+          p_subject: targetSubject,
+          p_topic: null,
+          p_limit: 5000,
         });
 
-        if (mathError) throw new Error(mathError.message);
+        if (error) {
+          if (isPracticePoolRpcUnavailable(error)) {
+            setPoolNotice(
+              "Fresh-pool tracking backend is not fully active yet. Using standard question rotation."
+            );
+            return null;
+          }
+          throw new Error(error.message);
+        }
 
-        const reading = list;
-        const math = (mathData ?? []) as Question[];
+        const ids = new Set<string>();
+        for (const row of ((data ?? []) as SeenQuestionRow[])) {
+          ids.add(String(row.question_id));
+        }
+        return ids;
+      };
+
+      let list: Question[] = [];
+
+      if (subject === "Combined") {
+        const readingLimit = Math.ceil(fetchLimit / 2);
+        const mathLimit = Math.floor(fetchLimit / 2);
+        const [readingRaw, mathRaw] = await Promise.all([
+          fetchQuestions({
+            targetSubject: "Reading",
+            targetSubskill: null,
+            targetLimit: readingLimit,
+          }),
+          fetchQuestions({
+            targetSubject: "Math",
+            targetSubskill: null,
+            targetLimit: mathLimit,
+          }),
+        ]);
+
+        let reading = readingRaw;
+        let math = mathRaw;
+
+        if (usesFreshPool) {
+          const [seenReading, seenMath] = await Promise.all([
+            fetchSeenQuestionIds("Reading"),
+            fetchSeenQuestionIds("Math"),
+          ]);
+
+          if (seenReading) {
+            reading = reading.filter((question) => !seenReading.has(question.id));
+          }
+          if (seenMath) {
+            math = math.filter((question) => !seenMath.has(question.id));
+          }
+        }
+
         const mixed: Question[] = [];
         const maxLen = Math.max(reading.length, math.length);
-
         for (let i = 0; i < maxLen; i += 1) {
           if (reading[i]) mixed.push(reading[i]);
           if (math[i]) mixed.push(math[i]);
         }
-
         list = mixed.slice(0, limit);
+      } else {
+        const base = await fetchQuestions({
+          targetSubject: subject,
+          targetSubskill: subskill || null,
+          targetLimit: fetchLimit,
+        });
+        let filtered = base;
+
+        if (usesFreshPool) {
+          const seen = await fetchSeenQuestionIds(subject);
+          if (seen) {
+            filtered = base.filter((question) => !seen.has(question.id));
+          }
+        }
+
+        list = filtered.slice(0, limit);
+      }
+
+      if (!list.length && usesFreshPool) {
+        throw new Error(
+          "No fresh questions are currently available for this filter. Use Review or switch to explicit revisit."
+        );
       }
       if (!list.length) throw new Error("No questions returned for this filter.");
+      if (usesFreshPool && list.length < limit) {
+        setPoolNotice(
+          `Only ${list.length} fresh question${list.length === 1 ? "" : "s"} available right now for this filter.`
+        );
+      }
 
       setQuestions(list);
       setIdx(0);
@@ -418,9 +646,16 @@ export default function PracticeClient() {
       setCopiedShare(false);
       setSessionClientId(createClientSessionId());
       setHistorySessionId(null);
+      setFinalAnalysis(null);
+      setPostSessionDueCount(null);
+      setPostSessionMasteryProbe(null);
+      setPostSessionSignalsNotice(null);
       setToolsOpen(false);
       setExamDraftAnswers({});
       setExamMarked({});
+      setExamNavFilter("all");
+      setExamSubmitPanelOpen(false);
+      setExamNavigatorOpen(false);
       setExamStartedAtMs(Date.now());
       resetQuestionUI();
       resetTimingState();
@@ -447,13 +682,23 @@ export default function PracticeClient() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subject, subskill]);
+  }, [subject, subskill, includeSeen]);
 
   function switchSubject(nextSubject: "Reading" | "Math" | "Combined") {
     const params = new URLSearchParams(sp.toString());
     params.set("subject", nextSubject);
     params.delete("subskill");
     router.push(`/practice?${params.toString()}`);
+  }
+
+  function switchPoolMode(nextIncludeSeen: boolean) {
+    const params = new URLSearchParams(sp.toString());
+    if (nextIncludeSeen) {
+      params.set("revisit", "1");
+    } else {
+      params.delete("revisit");
+    }
+    router.replace(`/practice?${params.toString()}`);
   }
 
   function startSession() {
@@ -466,9 +711,17 @@ export default function PracticeClient() {
     setCopiedShare(false);
     setSessionClientId(createClientSessionId());
     setHistorySessionId(null);
+    setBaselineLastSession(identity?.lastSession ?? null);
+    setFinalAnalysis(null);
+    setPostSessionDueCount(null);
+    setPostSessionMasteryProbe(null);
+    setPostSessionSignalsNotice(null);
     setToolsOpen(false);
     setExamDraftAnswers({});
     setExamMarked({});
+    setExamNavFilter("all");
+    setExamSubmitPanelOpen(false);
+    setExamNavigatorOpen(false);
     setExamStartedAtMs(Date.now());
     resetQuestionUI();
     resetTimingState();
@@ -493,10 +746,92 @@ export default function PracticeClient() {
     }));
   }
 
+  const hydratePostSessionSignals = useCallback(async (args: {
+    source: Record<string, AnswerInsert>;
+    sourceAnalysis: SessionAnalysis;
+  }) => {
+    setPostSessionSignalsNotice(null);
+    setPostSessionDueCount(null);
+    setPostSessionMasteryProbe(null);
+
+    const supabase = getSupabase();
+
+    try {
+      const dueRes = await supabase.rpc("get_due_review_questions", { p_limit: 120 });
+      if (dueRes.error) throw new Error(dueRes.error.message);
+      setPostSessionDueCount(((dueRes.data ?? []) as Array<{ id: string }>).length);
+    } catch (e: unknown) {
+      setPostSessionDueCount(null);
+      setPostSessionSignalsNotice(errorMessage(e, "Post-session due queue snapshot is unavailable."));
+    }
+
+    const probeTopic = args.sourceAnalysis.primaryRepairTarget?.topic || subskill || null;
+    if (!probeTopic) return;
+
+    const probeSubjectFromAnswers = Object.values(args.source).find(
+      (answer) => (answer.topic?.trim() || "Unknown") === probeTopic
+    )?.subject;
+
+    const subjectCandidates: Array<"Reading" | "Math"> =
+      probeSubjectFromAnswers === "Reading" || probeSubjectFromAnswers === "Math"
+        ? [probeSubjectFromAnswers]
+        : subject === "Reading"
+        ? ["Reading"]
+        : subject === "Math"
+        ? ["Math"]
+        : ["Reading", "Math"];
+
+    type MasteryRow = { subskill: string; attempts: number; accuracy: number | null };
+    try {
+      let matched: MasteryRow | null = null;
+      let matchedSubject: "Reading" | "Math" = subjectCandidates[0] || "Reading";
+
+      for (const candidateSubject of subjectCandidates) {
+        const res = await supabase.rpc("get_skill_mastery", { p_subject: candidateSubject });
+        if (res.error) throw new Error(res.error.message);
+
+        const rows = (res.data ?? []) as MasteryRow[];
+        const hit = rows.find(
+          (row) => row.subskill.trim().toLowerCase() === probeTopic.trim().toLowerCase()
+        );
+        if (hit) {
+          matched = hit;
+          matchedSubject = candidateSubject;
+          break;
+        }
+      }
+
+      if (!matched) return;
+      const attempts = Math.max(0, Math.round(matched.attempts || 0));
+      const accuracy = Math.max(0, Math.min(1, Number(matched.accuracy ?? 0)));
+
+      setPostSessionMasteryProbe({
+        subject: matchedSubject,
+        topic: matched.subskill,
+        attempts,
+        accuracyPct: Math.round(accuracy * 100),
+        mastery: masteryFor({ attempts, accuracy }),
+        movement: movementFor({ attempts, accuracy }),
+      });
+    } catch (e: unknown) {
+      setPostSessionMasteryProbe(null);
+      setPostSessionSignalsNotice((prev) => prev || errorMessage(e, "Mastery movement probe is unavailable."));
+    }
+  }, [subject, subskill]);
+
   const finishSession = useCallback(async (finalAnswers?: Record<string, AnswerInsert>) => {
     const source = finalAnswers ?? answers;
     const answered = Object.keys(source).length;
     const correct = Object.values(source).filter((answer) => answer.is_correct).length;
+    const sourceAnalysis = analyzeReviewSession(
+      Object.entries(source).map(([questionId, value]) => ({
+        questionId,
+        subject: value.subject,
+        topic: value.topic,
+        correct: value.is_correct,
+      }))
+    );
+    setFinalAnalysis(sourceAnalysis);
 
     try {
       const applied = await recordDurableEngagementSession({
@@ -535,12 +870,13 @@ export default function PracticeClient() {
         answeredCount: answered,
         correctCount: correct,
         durationSeconds: Math.max(0, Math.round((Date.now() - examStartedAtMs) / 1000)),
-        outcome: sessionAnalysis.outcome,
+        outcome: sourceAnalysis.outcome,
         scoreBandLow: scoreBand.low,
         scoreBandHigh: scoreBand.high,
         topics: buildTopicSnapshots(source),
       });
       setHistorySessionId(history.sessionId);
+      await hydratePostSessionSignals({ source, sourceAnalysis });
     } catch (e: unknown) {
       setSessionPayoff(null);
       setEngagementNotice(errorMessage(e, "Session results saved, but durable engagement sync failed."));
@@ -548,12 +884,13 @@ export default function PracticeClient() {
 
     setMode("done");
     setToolsOpen(false);
-  }, [answers, sessionClientId, total, practiceMode, subject, subskill, examStartedAtMs, sessionAnalysis.outcome, scoreBand.low, scoreBand.high]);
+  }, [answers, sessionClientId, total, practiceMode, subject, subskill, examStartedAtMs, scoreBand.low, scoreBand.high, hydratePostSessionSignals]);
 
   const finalizeExamSession = useCallback(async (args?: { forceAutoFill?: boolean }) => {
     if (!questions.length || saving) return;
     setSaving(true);
     setErr(null);
+    setExamSubmitPanelOpen(false);
 
     try {
       const working = { ...examDraftAnswers };
@@ -564,7 +901,7 @@ export default function PracticeClient() {
         }
         setTimingNotice(`Exam submitted with ${unanswered.length} auto-filled unanswered question(s).`);
       } else if (unanswered.length > 0) {
-        setErr(`You still have ${unanswered.length} unanswered question(s). Answer or auto-fill by submitting after timer expires.`);
+        setErr(`You still have ${unanswered.length} unanswered question(s). Finish them before final submission.`);
         setSaving(false);
         return;
       }
@@ -622,6 +959,29 @@ export default function PracticeClient() {
     setAiExplainLoading(false);
   }, [examDraftAnswers, practiceMode, questions]);
 
+  const jumpToFirstUnansweredExamQuestion = useCallback(() => {
+    const nextIdx = questions.findIndex((question) => !examDraftAnswers[question.id]);
+    if (nextIdx >= 0) {
+      jumpToQuestion(nextIdx);
+      return true;
+    }
+    return false;
+  }, [questions, examDraftAnswers, jumpToQuestion]);
+
+  const jumpToFirstMarkedExamQuestion = useCallback(() => {
+    const nextIdx = questions.findIndex((question) => !!examMarked[question.id]);
+    if (nextIdx >= 0) {
+      jumpToQuestion(nextIdx);
+      return true;
+    }
+    return false;
+  }, [questions, examMarked, jumpToQuestion]);
+
+  const jumpToPreviousQuestion = useCallback(() => {
+    if (idx <= 0) return;
+    jumpToQuestion(idx - 1);
+  }, [idx, jumpToQuestion]);
+
   const submitAnswer = useCallback(async (args?: {
     forcedOption?: string;
     timedOut?: boolean;
@@ -637,13 +997,14 @@ export default function PracticeClient() {
     if (practiceMode === "exam") {
       setExamDraftAnswers((prev) => ({ ...prev, [q.id]: chosen }));
       setSelected(chosen);
+      setExamSubmitPanelOpen(false);
       if (args?.forceFinish) {
         await finalizeExamSession({ forceAutoFill: true });
         return;
       }
       const isLast = idx >= questions.length - 1;
       if (isLast) {
-        await finalizeExamSession({ forceAutoFill: false });
+        setExamSubmitPanelOpen(true);
       } else {
         jumpToQuestion(idx + 1);
       }
@@ -833,6 +1194,12 @@ export default function PracticeClient() {
       ? `${subject} targeted run`
       : `${subject} focus`;
 
+  const poolModeLabel = subskill
+    ? "Targeted revisit"
+    : includeSeen
+    ? "Explicit revisit"
+    : "Fresh pool";
+
   const modeLabel =
     practiceMode === "trainer" ? "Trainer" : practiceMode === "timed" ? "Timed" : "Exam";
 
@@ -843,6 +1210,55 @@ export default function PracticeClient() {
       ? `Exam ${formatClock(examSecondsLeft ?? 0)}`
       : `Accuracy ${accuracyPct}%`;
 
+  const modePillTone: "neutral" | "accent" | "danger" =
+    practiceMode === "exam" && examSecondsLeft !== null && examSecondsLeft <= 90
+      ? "danger"
+      : practiceMode === "trainer"
+      ? "neutral"
+      : "accent";
+
+  const modeExecutionIdentity =
+    practiceMode === "trainer"
+      ? "Immediate feedback, explanation, and rapid correction."
+      : practiceMode === "timed"
+      ? "Per-question pressure with enforced locks and no drifting."
+      : "Strict SAT-like block: save answers, review navigator, submit once.";
+
+  const estimatedBlockMinutes = useMemo(() => {
+    if (!questions.length) return 0;
+    if (practiceMode === "exam") return Math.max(1, Math.round(examTimeLimitSeconds(questions) / 60));
+    if (practiceMode === "timed") {
+      const baseSubject = subject === "Combined" ? "Combined" : subject;
+      return Math.max(1, Math.round((questionTimeLimitSeconds(baseSubject) * questions.length) / 60));
+    }
+    return Math.max(1, Math.round((questions.length * 78) / 60));
+  }, [practiceMode, questions, subject]);
+
+  const momentumStateLabel = useMemo(() => {
+    if (momentum.energy >= 82) return "Locked momentum";
+    if (momentum.energy >= 62) return "Stable momentum";
+    if (momentum.energy >= 40) return "Recovering momentum";
+    return "Low momentum";
+  }, [momentum.energy]);
+
+  const examSections = useMemo(() => {
+    if (practiceMode !== "exam" || !questions.length) return [];
+    const grouped = new Map<string, { label: string; firstIdx: number; count: number; answered: number; marked: number }>();
+
+    questions.forEach((question, qIdx) => {
+      const label = question.subject === "Math" ? "Math section" : "Reading section";
+      if (!grouped.has(label)) {
+        grouped.set(label, { label, firstIdx: qIdx, count: 0, answered: 0, marked: 0 });
+      }
+      const row = grouped.get(label)!;
+      row.count += 1;
+      if (examDraftAnswers[question.id]) row.answered += 1;
+      if (examMarked[question.id]) row.marked += 1;
+    });
+
+    return [...grouped.values()];
+  }, [practiceMode, questions, examDraftAnswers, examMarked]);
+
   return (
     <main className="min-h-screen">
       <PageHeader
@@ -850,8 +1266,8 @@ export default function PracticeClient() {
         title="Practice"
         subtitle={
           subskill
-            ? `${subjectSummary} • ${modeLabel} mode • focused on ${subskill}`
-            : `${subjectSummary} • ${modeLabel} mode • focused 12-question session`
+            ? `${subjectSummary} • ${modeLabel} mode • ${poolModeLabel} • focused on ${subskill}`
+            : `${subjectSummary} • ${modeLabel} mode • ${poolModeLabel} • focused 12-question session`
         }
         right={
           <button
@@ -934,23 +1350,89 @@ export default function PracticeClient() {
                 <div className="mt-3 grid gap-3 md:grid-cols-3">
                   {PRACTICE_MODES.map((m) => {
                     const active = practiceMode === m.key;
+                    const lockedByTier = m.key === "exam" && !tier.limits.examMode;
                     return (
                       <button
                         key={m.key}
-                        onClick={() => setPracticeMode(m.key)}
+                        onClick={() => {
+                          if (lockedByTier) {
+                            router.push("/pricing");
+                            return;
+                          }
+                          setPracticeMode(m.key);
+                        }}
+                        disabled={lockedByTier}
                         className={[
-                          "rounded-xl border p-4 text-left transition",
+                          "rounded-xl border p-4 text-left transition disabled:cursor-not-allowed",
                           active
                             ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33] shadow-sm"
+                            : lockedByTier
+                            ? "border-[#4a5a7a] bg-white/5 text-[#8fa2c4] opacity-70"
                             : "border-[#3e557e] bg-white/5 text-white hover:border-[#5f7dae] hover:bg-white/10",
                         ].join(" ")}
                       >
-                        <div className={`text-sm font-semibold ${active ? "text-[#0f1b33]" : "text-white"}`}>{m.label}</div>
-                        <div className={`mt-2 text-xs ${active ? "text-[#23375d]" : "text-[#cfdbf3]"}`}>{m.note}</div>
+                        <div className={`text-sm font-semibold ${active ? "text-[#0f1b33]" : lockedByTier ? "text-[#9fb2d3]" : "text-white"}`}>
+                          {m.label}
+                          {lockedByTier && <span className="ml-1 text-[10px] uppercase tracking-[0.12em]">Pro+</span>}
+                        </div>
+                        <div className={`mt-2 text-xs ${active ? "text-[#23375d]" : lockedByTier ? "text-[#8fa2c4]" : "text-[#cfdbf3]"}`}>{m.note}</div>
                       </button>
                     );
                   })}
                 </div>
+
+                {planNotice && (
+                  <div className="mt-3 rounded-xl border border-[#5872a7] bg-white/10 px-3 py-3 text-xs text-[#d6e3fb]">
+                    {planNotice}
+                  </div>
+                )}
+
+                {!subskill && (
+                  <div className="mt-3 rounded-xl border border-[#3e557e] bg-white/5 p-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">
+                      Question pool discipline
+                    </div>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      <button
+                        onClick={() => switchPoolMode(false)}
+                        className={[
+                          "rounded-lg border px-3 py-2 text-left text-xs font-semibold transition",
+                          !includeSeen
+                            ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33]"
+                            : "border-[#4b628f] bg-white/10 text-[#d8e4fb] hover:bg-white/15",
+                        ].join(" ")}
+                      >
+                        Fresh only
+                      </button>
+                      <button
+                        onClick={() => switchPoolMode(true)}
+                        className={[
+                          "rounded-lg border px-3 py-2 text-left text-xs font-semibold transition",
+                          includeSeen
+                            ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33]"
+                            : "border-[#4b628f] bg-white/10 text-[#d8e4fb] hover:bg-white/15",
+                        ].join(" ")}
+                      >
+                        Explicit revisit
+                      </button>
+                    </div>
+                    <div className="mt-2 text-xs text-[#c8d4ed]">
+                      Fresh mode avoids casual repeats. Revisit mode is intentional drilling.
+                    </div>
+                  </div>
+                )}
+
+                {subskill && (
+                  <div className="mt-3 rounded-xl border border-[#3e557e] bg-white/5 px-3 py-3 text-xs text-[#c8d4ed]">
+                    Targeted subskill mode is treated as explicit revisit by design.
+                  </div>
+                )}
+
+                {poolNotice && (
+                  <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+                    {poolNotice}
+                  </div>
+                )}
 
                 <div className="mt-4 grid gap-3 sm:grid-cols-3">
                   <div className="rounded-xl border border-[#3e557e] bg-white/5 px-3 py-3 text-sm text-[#cbd8f0]">
@@ -960,7 +1442,7 @@ export default function PracticeClient() {
                     Mode: <span className="font-semibold text-white">{modeLabel}</span>
                   </div>
                   <div className="rounded-xl border border-[#3e557e] bg-white/5 px-3 py-3 text-sm text-[#cbd8f0]">
-                    Questions: <span className="font-semibold text-white">{limit}</span>
+                    Pool: <span className="font-semibold text-white">{poolModeLabel}</span>
                   </div>
                 </div>
 
@@ -992,12 +1474,35 @@ export default function PracticeClient() {
                 </div>
 
                 <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Payoff model</div>
-                  <div className="mt-2 text-sm text-[#d2dbec]">Base accuracy XP + completion bonus + combo pressure.</div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Execution profile</div>
+                  <div className="mt-2 text-sm text-[#d2dbec]">{modeExecutionIdentity}</div>
+                  <div className="mt-3 text-xs text-[#c8d4ed]">
+                    Estimated block: {estimatedBlockMinutes}m • {questions.length} questions
+                  </div>
                   {identity && identityStatus && (
                     <div className="mt-3 text-xs text-[#c8d4ed]">
                       {identityStatus.division.label} L{identityStatus.level} • {identity.streakDays}d streak
                     </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Pool policy</div>
+                  <div className="mt-2 text-sm text-[#d2dbec]">
+                    {!includeSeen && !subskill
+                      ? "Fresh-only rotation. Previously seen questions are blocked from casual replay."
+                      : "Intentional revisit mode. Use this only for targeted reinforcement."}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Current plan</div>
+                  <div className="mt-2 text-sm font-semibold text-white">{tier.label}</div>
+                  <div className="mt-1 text-xs text-[#c8d4ed]">{tier.tagline}</div>
+                  {!tier.limits.examMode && (
+                    <Link href="/pricing" className="mt-3 inline-flex text-xs font-semibold text-[#b9d6ff] underline">
+                      Unlock exam shell in Pro
+                    </Link>
                   )}
                 </div>
 
@@ -1040,7 +1545,8 @@ export default function PracticeClient() {
                 {subject === "Combined" ? `${q.subject} live` : modeLabel} • Question {Math.min(idx + 1, total)} / {total}
               </div>
               <div className="flex flex-wrap gap-2">
-                <Pill text={modePill} tone={practiceMode === "trainer" ? "neutral" : "accent"} />
+                <Pill text={modePill} tone={modePillTone} />
+                <Pill text={poolModeLabel} tone={includeSeen || subskill ? "accent" : "neutral"} />
                 <Pill text={`Combo ${momentum.combo}`} tone={momentum.currentStreak >= 4 ? "success" : "neutral"} />
                 {hasMathTools && (
                   <button
@@ -1059,26 +1565,52 @@ export default function PracticeClient() {
                 style={{ width: `${momentum.progressPct}%` }}
               />
             </div>
-            <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-[#c8d4ed]">
+            <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-[#c8d4ed] sm:grid-cols-4">
               <div>Answered {practiceMode === "exam" ? examAnsweredCount : answeredCount}</div>
               <div>Correct {correctCount}</div>
-              <div className="text-right">Session XP {momentum.sessionXp}</div>
+              <div>Session XP {momentum.sessionXp}</div>
+              <div className="sm:text-right">Energy {momentum.energy}%</div>
             </div>
+            <div className="mt-2 text-xs text-[#9db0d2]">{momentumStateLabel}</div>
             {practiceMode === "exam" && (
               <div className="mt-3 grid gap-2 sm:grid-cols-3">
                 <div className="rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-xs text-[#cedaf1]">
                   Marked: <span className="font-semibold text-white">{examMarkedCount}</span>
                 </div>
                 <div className="rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-xs text-[#cedaf1]">
-                  Unanswered: <span className="font-semibold text-white">{Math.max(total - examAnsweredCount, 0)}</span>
+                  Unanswered: <span className="font-semibold text-white">{examUnansweredCount}</span>
                 </div>
-                <button
-                  onClick={() => void finalizeExamSession({ forceAutoFill: false })}
-                  disabled={saving}
-                  className="rounded-lg border border-[#4f6795] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb] disabled:opacity-60"
-                >
-                  Submit exam now
-                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setExamNavigatorOpen((prev) => !prev)}
+                    className="rounded-lg border border-[#4f6795] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb]"
+                  >
+                    {examNavigatorOpen ? "Hide map" : "Open map"}
+                  </button>
+                  <button
+                    onClick={() => setExamSubmitPanelOpen(true)}
+                    disabled={saving}
+                    className="rounded-lg border border-[#4f6795] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb] disabled:opacity-60"
+                  >
+                    Review & submit
+                  </button>
+                </div>
+              </div>
+            )}
+            {practiceMode === "exam" && examSections.length > 1 && (
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                {examSections.map((section) => (
+                  <button
+                    key={section.label}
+                    onClick={() => jumpToQuestion(section.firstIdx)}
+                    className="rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-left text-xs text-[#cfe0ff] hover:bg-white/10"
+                  >
+                    <div className="font-semibold text-white">{section.label}</div>
+                    <div className="mt-1 text-[#c4d5f3]">
+                      {section.answered}/{section.count} answered • {section.marked} marked
+                    </div>
+                  </button>
+                ))}
               </div>
             )}
           </div>
@@ -1161,7 +1693,7 @@ export default function PracticeClient() {
                   onClick={submit}
                   disabled={!selected || saving}
                 >
-                  {idx === total - 1 ? (saving ? "Saving…" : "Save & submit exam") : saving ? "Saving…" : "Save & next"}
+                  {idx === total - 1 ? (saving ? "Saving…" : "Save & review") : saving ? "Saving…" : "Save & next"}
                 </button>
               ) : !locked ? (
                 <button
@@ -1221,9 +1753,32 @@ export default function PracticeClient() {
           </Card>
 
           {practiceMode === "exam" && (
+            <div className={`${examNavigatorOpen ? "block" : "hidden"} lg:block`}>
             <Card title="Question navigator" subtitle="Jump between items, revisit marked questions, then submit.">
+              <div className="mb-3 flex flex-wrap gap-2">
+                {([
+                  { key: "all", label: `All (${total})` },
+                  { key: "marked", label: `Marked (${examMarkedCount})` },
+                  { key: "unanswered", label: `Unanswered (${examUnansweredCount})` },
+                ] as const).map((item) => (
+                  <button
+                    key={item.key}
+                    onClick={() => setExamNavFilter(item.key)}
+                    className={[
+                      "rounded-full border px-3 py-1 text-xs font-semibold transition",
+                      examNavFilter === item.key
+                        ? "border-[#0f1b33] bg-[#0f1b33] text-white"
+                        : "border-gray-300 bg-white text-gray-700 hover:border-gray-400",
+                    ].join(" ")}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+
               <div className="grid grid-cols-6 gap-2 sm:grid-cols-8 lg:grid-cols-12">
-                {questions.map((question, qIdx) => {
+                {examVisibleQuestionIndices.map((qIdx) => {
+                  const question = questions[qIdx];
                   const isCurrent = idx === qIdx;
                   const isMarked = !!examMarked[question.id];
                   const isAnswered = !!examDraftAnswers[question.id];
@@ -1247,13 +1802,170 @@ export default function PracticeClient() {
                   );
                 })}
               </div>
+              {examVisibleQuestionIndices.length === 0 && (
+                <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                  No questions match this filter.
+                </div>
+              )}
               <div className="mt-3 grid gap-2 text-xs text-gray-600 sm:grid-cols-3">
                 <div>Answered {examAnsweredCount}/{total}</div>
                 <div>Marked {examMarkedCount}</div>
-                <div>Unanswered {Math.max(total - examAnsweredCount, 0)}</div>
+                <div>Unanswered {examUnansweredCount}</div>
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <button
+                  onClick={() => {
+                    const jumped = jumpToFirstUnansweredExamQuestion();
+                    if (jumped) setExamNavFilter("unanswered");
+                    setExamNavigatorOpen(false);
+                  }}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 transition hover:bg-gray-50"
+                >
+                  Jump to first unanswered
+                </button>
+                <button
+                  onClick={() => {
+                    const jumped = jumpToFirstMarkedExamQuestion();
+                    if (jumped) setExamNavFilter("marked");
+                    setExamNavigatorOpen(false);
+                  }}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 transition hover:bg-gray-50"
+                >
+                  Jump to first marked
+                </button>
+              </div>
+            </Card>
+            </div>
+          )}
+
+          {practiceMode === "exam" && examSubmitPanelOpen && (
+            <Card
+              title="Exam submission checkpoint"
+              subtitle="Run this check before final submission."
+              right={<Pill text={examUnansweredCount === 0 ? "Ready" : "Incomplete"} tone={examUnansweredCount === 0 ? "success" : "danger"} />}
+              accent
+              prominence="prominent"
+            >
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+                  Answered: <span className="font-semibold text-black">{examAnsweredCount}/{total}</span>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+                  Marked: <span className="font-semibold text-black">{examMarkedCount}</span>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+                  Unanswered: <span className="font-semibold text-black">{examUnansweredCount}</span>
+                </div>
+              </div>
+
+              {examUnansweredCount > 0 && (
+                <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+                  Submission is locked until unanswered questions are completed.
+                </div>
+              )}
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <button
+                  onClick={() => {
+                    jumpToFirstUnansweredExamQuestion();
+                    setExamNavFilter("unanswered");
+                    setExamSubmitPanelOpen(false);
+                  }}
+                  className="inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-[#0f172a] transition hover:border-gray-400 hover:bg-gray-50"
+                  disabled={examUnansweredCount === 0}
+                >
+                  Fix unanswered
+                </button>
+                <button
+                  onClick={() => {
+                    jumpToFirstMarkedExamQuestion();
+                    setExamNavFilter("marked");
+                    setExamSubmitPanelOpen(false);
+                  }}
+                  className="inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-[#0f172a] transition hover:border-gray-400 hover:bg-gray-50"
+                  disabled={examMarkedCount === 0}
+                >
+                  Review marked
+                </button>
+                <button
+                  onClick={() => void finalizeExamSession({ forceAutoFill: false })}
+                  className="inline-flex items-center justify-center rounded-xl border border-[#0e1b34] bg-[#0e1b34] px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1a2b4a] disabled:opacity-60"
+                  disabled={examUnansweredCount > 0 || saving}
+                >
+                  {saving ? "Submitting…" : "Submit exam"}
+                </button>
               </div>
             </Card>
           )}
+
+          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-gray-200 bg-[rgba(248,251,255,0.98)] px-4 pb-[calc(env(safe-area-inset-bottom)+0.7rem)] pt-3 shadow-xl backdrop-blur md:hidden">
+            <div className="mx-auto max-w-3xl rounded-2xl border border-white/90 bg-white/90 p-3">
+              <div className="mb-2 text-xs font-semibold text-[#0f172a]">
+                {practiceMode === "exam"
+                  ? `Exam shell • ${examAnsweredCount}/${total} answered`
+                  : `${modeLabel} live • ${answeredCount}/${total} answered`}
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  onClick={jumpToPreviousQuestion}
+                  disabled={idx <= 0 || saving}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <button
+                  onClick={() => {
+                    if (practiceMode === "exam") {
+                      void submit();
+                      return;
+                    }
+                    if (!locked) {
+                      void submit();
+                      return;
+                    }
+                    void nextOrFinish();
+                  }}
+                  disabled={
+                    saving ||
+                    (practiceMode === "exam" ? !selected : !locked && !selected)
+                  }
+                  className="rounded-lg border border-[#0e1b34] bg-[#0e1b34] px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                >
+                  {practiceMode === "exam"
+                    ? idx === total - 1
+                      ? "Save & review"
+                      : "Save & next"
+                    : !locked
+                    ? "Submit"
+                    : idx === total - 1
+                    ? "Finish"
+                    : "Next"}
+                </button>
+                {practiceMode === "exam" ? (
+                  <button
+                    onClick={() => setExamNavigatorOpen((prev) => !prev)}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700"
+                  >
+                    {examNavigatorOpen ? "Hide map" : "Open map"}
+                  </button>
+                ) : hasMathTools ? (
+                  <button
+                    onClick={() => setToolsOpen(true)}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700"
+                  >
+                    Tools
+                  </button>
+                ) : (
+                  <button
+                    disabled
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-500 disabled:opacity-80"
+                  >
+                    No tools
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
 
         </div>
       )}
@@ -1277,7 +1989,7 @@ export default function PracticeClient() {
                     Score: <span className="font-semibold text-white">{correctCount}/{total}</span>
                   </div>
                   <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
-                    Accuracy: <span className="font-semibold text-white">{sessionAnalysis.accuracyPct}%</span>
+                    Accuracy: <span className="font-semibold text-white">{analysis.accuracyPct}%</span>
                   </div>
                 </div>
               </div>
@@ -1294,6 +2006,16 @@ export default function PracticeClient() {
                     {repairTopic ? `Primary repair target: ${repairTopic}` : "No single failed topic dominated this set."}
                   </div>
                 </div>
+                {executionDelta && (
+                  <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Change vs previous block</div>
+                    <div className="mt-2 text-sm text-[#d2dbec]">
+                      Accuracy {executionDelta.accuracyDelta >= 0 ? "+" : ""}{executionDelta.accuracyDelta}%
+                      <span className="mx-1 text-[#7389b4]">•</span>
+                      XP {executionDelta.xpDelta >= 0 ? "+" : ""}{executionDelta.xpDelta}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </section>
@@ -1317,7 +2039,7 @@ export default function PracticeClient() {
                   />
                   <StatBox
                     label="Accuracy"
-                    value={`${sessionAnalysis.accuracyPct}%`}
+                    value={`${analysis.accuracyPct}%`}
                     hint="This session"
                     accent={accuracyPct >= 75}
                     size={accuracyPct >= 75 ? "large" : "default"}
@@ -1338,12 +2060,69 @@ export default function PracticeClient() {
                     : "No single failed topic dominated this set."}
                 </div>
                 <div className="mt-4 grid gap-3">
-                  <PrimaryButton href={repairTopic ? repairPracticeHref : undefined} onClick={repairTopic ? undefined : ensureAuthAndLoad}>
-                    {repairTopic ? "Run targeted repair" : "Run next set"}
-                  </PrimaryButton>
-                  <SecondaryButton href={repairTopic ? repairLessonHref : "/review"}>
-                    {repairTopic ? "Open lesson" : "Open review"}
+                  {postSessionRoute.primaryHref ? (
+                    <PrimaryButton href={postSessionRoute.primaryHref}>{postSessionRoute.primaryLabel}</PrimaryButton>
+                  ) : (
+                    <PrimaryButton onClick={ensureAuthAndLoad}>{postSessionRoute.primaryLabel}</PrimaryButton>
+                  )}
+                  <SecondaryButton href={postSessionRoute.secondaryHref}>
+                    {postSessionRoute.secondaryLabel}
                   </SecondaryButton>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <div className="rounded-2xl border border-gray-200 bg-white p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                  What changed in this block
+                </div>
+                <div className="mt-3 grid gap-2">
+                  {analysis.recoveredTopics.slice(0, 2).map((topic) => (
+                    <div key={`recovered-${topic.topic}`} className="rounded-lg border border-[#9de0bb] bg-[#ebfdf2] px-3 py-2 text-sm text-[#0f8a4e]">
+                      Recovered: <span className="font-semibold">{topic.topic}</span> ({Math.round(topic.accuracy * 100)}%)
+                    </div>
+                  ))}
+                  {analysis.failedTopics.slice(0, 2).map((topic) => (
+                    <div key={`failed-${topic.topic}`} className="rounded-lg border border-[#f5b8c4] bg-[#fff2f5] px-3 py-2 text-sm text-[#b02039]">
+                      Still weak: <span className="font-semibold">{topic.topic}</span> ({Math.round(topic.accuracy * 100)}%)
+                    </div>
+                  ))}
+                  {analysis.recoveredTopics.length === 0 && analysis.failedTopics.length === 0 && (
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                      Not enough topic movement yet. Run another focused block.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                  Post-session system state
+                </div>
+                <div className="mt-3 grid gap-2">
+                  {postSessionDueCount !== null && (
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                      Due for review now: <span className="font-semibold text-black">{postSessionDueCount}</span>
+                    </div>
+                  )}
+                  {postSessionMasteryProbe && (
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+                      <div className="text-sm font-semibold text-black">{postSessionMasteryProbe.topic}</div>
+                      <div className="mt-1 text-xs text-gray-600">
+                        {postSessionMasteryProbe.subject} • {postSessionMasteryProbe.accuracyPct}% • {postSessionMasteryProbe.attempts} attempts
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <Pill text={postSessionMasteryProbe.mastery} tone={masteryTone(postSessionMasteryProbe.mastery)} />
+                        <Pill text={postSessionMasteryProbe.movement} tone={movementTone(postSessionMasteryProbe.movement)} />
+                      </div>
+                    </div>
+                  )}
+                  {postSessionSignalsNotice && (
+                    <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      {postSessionSignalsNotice}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1432,6 +2211,7 @@ export default function PracticeClient() {
         onClose={() => setToolsOpen(false)}
         topicHint={toolsTopicHint}
         modeLabel={modeLabel}
+        strictExam={practiceMode === "exam" && mode === "in_session"}
       />
     </main>
   );

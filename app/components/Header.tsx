@@ -5,8 +5,9 @@ import { useEffect, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
 import { getSupabase } from "@/app/lib/supabase";
 import { getDurableEngagementSnapshot } from "@/app/lib/engagementDurable";
+import { normalizePlanTier, tierDefinition } from "@/app/lib/productTiers";
 
-const navItems = [
+const appNavItems = [
   { href: "/today", label: "Today", match: "/today" },
   { href: "/practice?subject=Reading", label: "Practice", match: "/practice" },
   { href: "/review", label: "Review", match: "/review" },
@@ -17,8 +18,23 @@ const navItems = [
   { href: "/leagues", label: "Community", match: "/leagues" },
 ];
 
+const publicNavItems = [
+  { href: "/", label: "Product", match: "/" },
+  { href: "/pricing", label: "Tiers", match: "/pricing" },
+  { href: "/demo", label: "Demo", match: "/demo" },
+];
+
 function isActivePath(pathname: string, match: string) {
   return match === "/" ? pathname === "/" : pathname.startsWith(match);
+}
+
+function isPublicPath(pathname: string) {
+  return (
+    pathname === "/" ||
+    pathname.startsWith("/pricing") ||
+    pathname.startsWith("/login") ||
+    pathname.startsWith("/demo")
+  );
 }
 
 function Wordmark({ compact = false }: { compact?: boolean }) {
@@ -44,10 +60,12 @@ function Wordmark({ compact = false }: { compact?: boolean }) {
 
 export default function Header() {
   const pathname = usePathname();
+  const publicSurface = isPublicPath(pathname);
   const [hasSession, setHasSession] = useState(false);
   const [ready, setReady] = useState(false);
   const [statusLabel, setStatusLabel] = useState<string | null>(null);
   const [streakLabel, setStreakLabel] = useState<string | null>(null);
+  const [planLabel, setPlanLabel] = useState<string | null>(null);
 
   useEffect(() => {
     const supabase = getSupabase();
@@ -57,18 +75,33 @@ export default function Header() {
       if (!userId) {
         setStatusLabel(null);
         setStreakLabel(null);
+        setPlanLabel(null);
         return;
       }
 
       try {
-        const snapshot = await getDurableEngagementSnapshot();
+        const [snapshot, profileRes] = await Promise.all([
+          getDurableEngagementSnapshot(),
+          supabase
+            .from("profiles")
+            .select("plan_tier")
+            .eq("id", userId)
+            .single(),
+        ]);
         if (!mounted) return;
         setStatusLabel(`${snapshot.status.division.label} L${snapshot.status.level}`);
         setStreakLabel(`${snapshot.identity.streakDays}d streak`);
+        if (!profileRes.error) {
+          const tier = tierDefinition(normalizePlanTier((profileRes.data as { plan_tier?: string | null })?.plan_tier));
+          setPlanLabel(tier.label);
+        } else {
+          setPlanLabel("Free");
+        }
       } catch {
         if (!mounted) return;
         setStatusLabel(null);
         setStreakLabel(null);
+        setPlanLabel(null);
       }
     }
 
@@ -83,7 +116,7 @@ export default function Header() {
       }
     }
 
-    bootstrap();
+    void bootstrap();
 
     const {
       data: { subscription },
@@ -108,19 +141,28 @@ export default function Header() {
     };
   }, []);
 
+  const navItems = publicSurface ? publicNavItems : hasSession ? appNavItems : publicNavItems;
+
   const rightAction = useMemo(() => {
     if (!ready) {
-      return <div className="h-9 w-20 shrink-0" aria-hidden="true" />;
+      return <div className="h-9 w-24 shrink-0" aria-hidden="true" />;
     }
 
     if (hasSession) {
       return (
         <div className="flex shrink-0 items-center gap-2">
-          {statusLabel && streakLabel && (
+          {planLabel && statusLabel && streakLabel && (
             <div className="hidden rounded-xl border border-[#b9d6ff] bg-[#eef5ff] px-3 py-2 text-xs font-semibold text-[#004aad] shadow-sm xl:block">
-              {statusLabel} • {streakLabel}
+              {planLabel} • {statusLabel} • {streakLabel}
             </div>
           )}
+
+          <Link
+            href="/pricing"
+            className="hidden rounded-xl px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-100 hover:text-black sm:inline-flex"
+          >
+            Tiers
+          </Link>
 
           <Link
             href="/profile"
@@ -147,16 +189,22 @@ export default function Header() {
         >
           Sign in
         </Link>
+        <Link
+          href="/login?mode=signup"
+          className="hidden items-center justify-center rounded-xl border border-[#0e1b34] bg-[#0e1b34] px-3 py-2 text-sm font-semibold text-white transition hover:bg-[#192948] sm:inline-flex"
+        >
+          Start free
+        </Link>
       </div>
     );
-  }, [hasSession, ready, statusLabel, streakLabel]);
+  }, [hasSession, planLabel, ready, statusLabel, streakLabel]);
 
   return (
     <header className="sticky top-0 z-40 border-b border-white/60 bg-[rgba(245,248,253,0.86)] backdrop-blur-xl">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-4 py-3">
         <div className="flex items-center gap-8">
           <Link
-            href="/"
+            href={hasSession ? "/today" : "/"}
             className="shrink-0 rounded-xl border border-white/80 bg-white/80 px-3 py-1.5 shadow-sm"
           >
             <Wordmark compact />
@@ -208,7 +256,7 @@ export default function Header() {
             );
           })}
 
-          {hasSession && (
+          {!publicSurface && hasSession && (
             <Link
               href="/profile"
               className={[

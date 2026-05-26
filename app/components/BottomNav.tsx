@@ -27,7 +27,7 @@ export default function BottomNav() {
       <div className="mx-auto max-w-3xl px-4 py-2">
         <div className="grid grid-cols-5 gap-2">
           {tabs.map((tab) => {
-            const active = pathname === tab.match;
+            const active = pathname.startsWith(tab.match);
 
             const href =
               tab.match === "/practice"

@@ -1,7 +1,9 @@
 import OpenAI from "openai";
 import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 import { checkAiRateLimit } from "@/app/lib/aiRateLimit";
 import { getUserFromAccessToken } from "@/app/lib/serverTokenAuth";
+import { normalizePlanTier, tierDefinition } from "@/app/lib/productTiers";
 
 type WeakArea = {
   subject: "Reading" | "Math";
@@ -69,15 +71,58 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing OPENAI_API_KEY." }, { status: 500 });
     }
 
-    const { user, error: authError } = await getUserFromAccessToken(
+    const { user, token, error: authError } = await getUserFromAccessToken(
       req.headers.get("authorization")
     );
 
-    if (!user) {
+    if (!user || !token) {
       return NextResponse.json({ error: authError || "Unauthorized." }, { status: 401 });
     }
 
-    const limiter = checkAiRateLimit(`coach:${user.id}`, 6, 10 * 60 * 1000);
+    let planTier = "free";
+    try {
+      const supabase = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        {
+          global: {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        }
+      );
+
+      const { data: profileRow, error: profileErr } = await supabase
+        .from("profiles")
+        .select("plan_tier")
+        .eq("id", user.id)
+        .single();
+
+      if (!profileErr) {
+        planTier = normalizePlanTier((profileRow as { plan_tier?: string | null })?.plan_tier ?? "free");
+      }
+    } catch {
+      planTier = "free";
+    }
+
+    const tier = tierDefinition(planTier);
+
+    if (!tier.limits.coachAi) {
+      return NextResponse.json(
+        {
+          error: "Coach strategist is available on Pro and Ultimate tiers.",
+          tier: planTier,
+        },
+        { status: 403 }
+      );
+    }
+
+    const limiter = checkAiRateLimit(
+      `coach:${planTier}:${user.id}`,
+      tier.limits.coachRateLimitPer10Min,
+      10 * 60 * 1000
+    );
     if (!limiter.ok) {
       return NextResponse.json(
         { error: "Rate limit exceeded. Try again in a few minutes." },

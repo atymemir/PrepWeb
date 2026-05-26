@@ -11,11 +11,13 @@ import {
   pickWeakestAcrossSubjects,
   type SkillRow,
 } from "../lib/learningSignals";
+import { masteryFor, focusedPracticeHref, focusedLessonHref, subjectForTopic, type MasteryState } from "../lib/mastery";
 import {
   pointsToNextDivision,
   type EngagementIdentity,
   type EngagementStatus,
 } from "../lib/engagement";
+import { normalizePlanTier, tierDefinition } from "../lib/productTiers";
 import { getDurableEngagementSnapshot } from "../lib/engagementDurable";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
 
@@ -27,6 +29,7 @@ type Profile = {
   exam_date: string | null;
   weakest_area: string | null;
   current_level: string | null;
+  plan_tier: string | null;
 };
 
 type LeaderEntry = {
@@ -71,6 +74,7 @@ export default function TodayPage() {
 
   const nickname = useMemo(() => profile?.nickname?.trim() || "Student", [profile]);
   const dleft = useMemo(() => daysUntil(profile?.exam_date ?? null), [profile]);
+  const plan = useMemo(() => tierDefinition(normalizePlanTier(profile?.plan_tier ?? "free")), [profile?.plan_tier]);
 
   const countdownText = useMemo(() => {
     if (dleft === null) return "Set SAT date";
@@ -98,14 +102,12 @@ export default function TodayPage() {
 
   const weakestHref = useMemo(() => {
     if (!weakestOverall?.row?.subskill) return "/practice?subject=Reading";
-    return `/practice?subject=${weakestOverall.subject}&subskill=${encodeURIComponent(
-      weakestOverall.row.subskill
-    )}`;
+    return focusedPracticeHref(weakestOverall.subject, weakestOverall.row.subskill, true);
   }, [weakestOverall]);
 
   const weakestLessonHref = useMemo(() => {
     if (!weakestOverall?.row?.subskill) return "/lessons";
-    return `/lesson/${encodeURIComponent(weakestOverall.row.subskill)}`;
+    return focusedLessonHref(weakestOverall.row.subskill);
   }, [weakestOverall]);
 
   const completionRate = useMemo(() => {
@@ -113,7 +115,70 @@ export default function TodayPage() {
     return Math.round((identity.completedSessions / identity.totalSessions) * 100);
   }, [identity]);
 
+  const masterySnapshot = useMemo(() => {
+    const allRows = [...skillsReading, ...skillsMath];
+
+    const counts = {
+      Mastered: 0,
+      Growing: 0,
+      Unstable: 0,
+      Untouched: 0,
+    } as Record<MasteryState, number>;
+
+    for (const row of allRows) {
+      counts[masteryFor({ attempts: row.attempts, accuracy: row.accuracy })] += 1;
+    }
+    return counts;
+  }, [skillsReading, skillsMath]);
+
+  const unstableTargets = useMemo(() => {
+    const merged = [
+      ...skillsReading.map((row) => ({
+        row,
+        subject: subjectForTopic("Reading"),
+        mastery: masteryFor({ attempts: row.attempts, accuracy: row.accuracy }),
+      })),
+      ...skillsMath.map((row) => ({
+        row,
+        subject: subjectForTopic("Math"),
+        mastery: masteryFor({ attempts: row.attempts, accuracy: row.accuracy }),
+      })),
+    ]
+      .filter((item) => item.mastery === "Unstable")
+      .sort((a, b) => {
+        const aAcc = a.row.accuracy ?? 0;
+        const bAcc = b.row.accuracy ?? 0;
+        if (aAcc !== bAcc) return aAcc - bAcc;
+        if ((a.row.attempts ?? 0) !== (b.row.attempts ?? 0)) return b.row.attempts - a.row.attempts;
+        return a.row.subskill.localeCompare(b.row.subskill);
+      });
+
+    return merged.slice(0, 3).map((item) => ({
+      subject: item.subject,
+      subskill: item.row.subskill,
+      accuracyPct: Math.round((item.row.accuracy ?? 0) * 100),
+      attempts: item.row.attempts,
+      practiceHref: focusedPracticeHref(item.subject, item.row.subskill, true),
+      lessonHref: focusedLessonHref(item.row.subskill),
+    }));
+  }, [skillsMath, skillsReading]);
+
   const priority = useMemo(() => {
+    const firstSession = (identity?.totalSessions ?? 0) === 0;
+
+    if (firstSession) {
+      return {
+        title: "Run your first signal block",
+        reason:
+          "Complete one focused 12-question practice block first. That unlocks reliable review pressure and mastery routing.",
+        ctaHref: "/practice?subject=Reading",
+        ctaLabel: "Start first practice",
+        secondaryHref: "/practice?subject=Math",
+        secondaryLabel: "Start with Math",
+        pill: "First block",
+      };
+    }
+
     if (dueReviewCount > 0) {
       return {
         title: "Clear review first",
@@ -153,7 +218,7 @@ export default function TodayPage() {
       secondaryLabel: "Open skills",
       pill: "Fresh start",
     };
-  }, [dueReviewCount, weakestOverall, weakestHref, weakestLessonHref]);
+  }, [dueReviewCount, identity?.totalSessions, weakestOverall, weakestHref, weakestLessonHref]);
 
   async function load() {
     setLoading(true);
@@ -173,14 +238,26 @@ export default function TodayPage() {
 
       const userId = session.user.id;
 
-      const p = await supabase
+      let p = await supabase
         .from("profiles")
-        .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level")
+        .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level,plan_tier")
         .eq("id", userId)
         .single();
 
+      if (p.error && String(p.error.message || "").toLowerCase().includes("plan_tier")) {
+        p = await supabase
+          .from("profiles")
+          .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level")
+          .eq("id", userId)
+          .single();
+      }
+
       if (p.error) throw new Error(p.error.message);
-      setProfile(p.data as Profile);
+      const profileRow = p.data as Omit<Profile, "plan_tier"> & { plan_tier?: string | null };
+      setProfile({
+        ...profileRow,
+        plan_tier: profileRow.plan_tier ?? "free",
+      });
 
       try {
         const snapshot = await getDurableEngagementSnapshot();
@@ -338,13 +415,67 @@ export default function TodayPage() {
                 </div>
 
                 <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Countdown</div>
-                  <div className="mt-1 text-2xl font-semibold tracking-tight text-white">{countdownText}</div>
-                  <div className="mt-1 text-xs text-[#c5d1e8]">SAT target window</div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Mastery pressure</div>
+                  <div className="mt-1 text-2xl font-semibold tracking-tight text-white">
+                    {masterySnapshot.Unstable}
+                  </div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">Unstable subtopics</div>
+                </div>
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Current plan</div>
+                  <div className="mt-1 text-2xl font-semibold tracking-tight text-white">
+                    {plan.label}
+                  </div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">{plan.tagline}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t border-white/10 bg-black/10 px-5 py-4 sm:px-6">
+              <div className="grid gap-2 text-xs text-[#c5d1e8] sm:grid-cols-4">
+                <div>
+                  Unstable: <span className="font-semibold text-white">{masterySnapshot.Unstable}</span>
+                </div>
+                <div>
+                  Growing: <span className="font-semibold text-white">{masterySnapshot.Growing}</span>
+                </div>
+                <div>
+                  Mastered: <span className="font-semibold text-white">{masterySnapshot.Mastered}</span>
+                </div>
+                <div>
+                  SAT window: <span className="font-semibold text-white">{countdownText}</span>
                 </div>
               </div>
             </div>
           </section>
+
+          {identity && identity.totalSessions === 0 && (
+            <Card
+              title="First-session route"
+              subtitle="The fastest way to make this system useful."
+              right={<Pill text="Start here" tone="accent" />}
+              accent
+            >
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">1. Practice</div>
+                  <div className="mt-1 text-sm text-gray-700">Finish one full block for clean baseline signal.</div>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">2. Review</div>
+                  <div className="mt-1 text-sm text-gray-700">Clear anything due so mistakes become active debt.</div>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">3. Skills</div>
+                  <div className="mt-1 text-sm text-gray-700">Pick one weak subtopic and run targeted repair.</div>
+                </div>
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <PrimaryButton href="/practice?subject=Reading">Start first block</PrimaryButton>
+                <SecondaryButton href="/practice?subject=Math">Start with Math</SecondaryButton>
+              </div>
+            </Card>
+          )}
 
           <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
             <Card
@@ -400,6 +531,30 @@ export default function TodayPage() {
               </div>
             </Card>
           </div>
+
+          {unstableTargets.length > 0 && (
+            <Card title="Subtopic strike list" subtitle="Run one precise repair route now.">
+              <div className="grid gap-3">
+                {unstableTargets.map((target, index) => (
+                  <div key={`${target.subject}-${target.subskill}`} className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-sm font-semibold text-black">
+                        #{index + 1} {target.subskill}
+                      </div>
+                      <Pill text={target.subject} tone="accent" />
+                    </div>
+                    <div className="mt-1 text-xs text-gray-600">
+                      {target.accuracyPct}% • n={target.attempts}
+                    </div>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <SecondaryButton href={target.practiceHref}>Practice now</SecondaryButton>
+                      <SecondaryButton href={target.lessonHref}>Open lesson</SecondaryButton>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
 
           <div className="flex flex-wrap gap-3 text-sm">
             <Link className="inline-flex rounded-full border border-gray-300 bg-white px-3 py-2 font-semibold text-gray-700 hover:border-gray-400 hover:text-black" href="/review">

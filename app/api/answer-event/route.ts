@@ -98,6 +98,24 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    if (!raw.is_review) {
+      const seenRes = await supabase.rpc("mark_practice_question_seen", {
+        p_question_id: raw.question_id,
+      });
+
+      if (seenRes.error) {
+        const lowerMessage = seenRes.error.message.toLowerCase();
+        const canIgnore =
+          seenRes.error.code === "PGRST202" ||
+          lowerMessage.includes("mark_practice_question_seen") ||
+          lowerMessage.includes("practice_fresh_seen");
+
+        if (!canIgnore) {
+          return NextResponse.json({ error: seenRes.error.message }, { status: 500 });
+        }
+      }
+    }
+
     return NextResponse.json({
       question_id: raw.question_id,
       selected_option: selectedOpt,

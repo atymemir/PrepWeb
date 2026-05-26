@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
+import { normalizePlanTier, tierDefinition, tierTone, type PlanTier } from "../lib/productTiers";
 import {
   confidenceLabel,
   pct,
@@ -24,6 +25,7 @@ type Profile = {
   exam_date: string | null;
   weakest_area: string | null;
   current_level: string | null;
+  plan_tier: string | null;
 };
 
 type SkillRow = SharedSkillRow;
@@ -119,6 +121,8 @@ export default function CoachPage() {
   }>(null);
 
   const nickname = profile?.nickname?.trim() || "Student";
+  const planTier = useMemo<PlanTier>(() => normalizePlanTier(profile?.plan_tier ?? "free"), [profile?.plan_tier]);
+  const tier = useMemo(() => tierDefinition(planTier), [planTier]);
   const dleft = useMemo(() => daysUntil(profile?.exam_date ?? null), [profile]);
 
   const weakestOverall = useMemo(() => {
@@ -311,14 +315,29 @@ export default function CoachPage() {
 
       const userId = session.user.id;
 
-      const profileRes = await supabase
+      let profileRes = await supabase
         .from("profiles")
-        .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level")
+        .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level,plan_tier")
         .eq("id", userId)
         .single();
 
+      if (
+        profileRes.error &&
+        String(profileRes.error.message || "").toLowerCase().includes("plan_tier")
+      ) {
+        profileRes = await supabase
+          .from("profiles")
+          .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level")
+          .eq("id", userId)
+          .single();
+      }
+
       if (profileRes.error) throw new Error(profileRes.error.message);
-      setProfile(profileRes.data as Profile);
+      const base = profileRes.data as Omit<Profile, "plan_tier"> & { plan_tier?: string | null };
+      setProfile({
+        ...base,
+        plan_tier: base.plan_tier ?? "free",
+      });
 
       const [readingRes, mathRes, dueRes, lbRes] = await Promise.all([
         supabase.rpc("get_skill_mastery", { p_subject: "Reading" }),
@@ -345,6 +364,10 @@ export default function CoachPage() {
 
   async function generateCoachNote() {
     if (aiLoading) return;
+    if (!tier.limits.coachAi) {
+      setAiError("AI strategist is available on Pro and Ultimate.");
+      return;
+    }
     setAiLoading(true);
     setAiError(null);
     try {
@@ -399,7 +422,12 @@ export default function CoachPage() {
         label="Strategist layer"
         title="Coach"
         subtitle={`Personal analysis for ${nickname}. Understand what matters now.`}
-        right={<Pill text="Strategist" tone="accent" />}
+        right={
+          <div className="flex items-center gap-2">
+            <Pill text={`${tier.label} plan`} tone={tierTone(planTier)} />
+            <Pill text="Strategist" tone="accent" />
+          </div>
+        }
       />
 
       {loading && (
@@ -463,6 +491,13 @@ export default function CoachPage() {
                   <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{stableWeakAreas.length}</div>
                   <div className="mt-1 text-xs text-[#c5d1e8]">High-confidence weak signals</div>
                 </div>
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">AI window</div>
+                  <div className="mt-1 text-2xl font-semibold tracking-tight text-white">
+                    {tier.limits.coachAi ? `${tier.limits.coachRateLimitPer10Min}/10m` : "Locked"}
+                  </div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">{tier.label} plan</div>
+                </div>
               </div>
             </div>
           </section>
@@ -516,20 +551,36 @@ export default function CoachPage() {
               )}
 
               <div className="mt-5 flex flex-wrap gap-3">
-                <button
-                  onClick={generateCoachNote}
-                  disabled={aiLoading}
-                  className="inline-flex items-center justify-center rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
-                >
-                  {aiLoading
-                    ? "Generating strategist note..."
-                    : aiCoach
-                    ? "Refresh strategist note"
-                    : "Generate strategist note"}
-                </button>
-                <div className="flex items-center text-xs text-gray-500">
-                  AI analysis is optional and may take 5-15 seconds.
-                </div>
+                {tier.limits.coachAi ? (
+                  <>
+                    <button
+                      onClick={generateCoachNote}
+                      disabled={aiLoading}
+                      className="inline-flex items-center justify-center rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
+                    >
+                      {aiLoading
+                        ? "Generating strategist note..."
+                        : aiCoach
+                        ? "Refresh strategist note"
+                        : "Generate strategist note"}
+                    </button>
+                    <div className="flex items-center text-xs text-gray-500">
+                      AI analysis is optional and may take 5-15 seconds.
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <Link
+                      href="/pricing"
+                      className="inline-flex items-center justify-center rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88]"
+                    >
+                      Unlock AI strategist
+                    </Link>
+                    <div className="flex items-center text-xs text-gray-500">
+                      Pro and Ultimate unlock strategist generation.
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </Card>
@@ -682,6 +733,14 @@ export default function CoachPage() {
 
               <div className="mt-4 rounded-xl border border-[#d9e7ff] bg-[#f8fbff] p-4 text-sm text-gray-700">
                 Guardrail: no score promises, no generic motivation, no broad chat. The output should make the next session clearer.
+              </div>
+              <div className="mt-4 rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
+                Current plan: <span className="font-semibold text-black">{tier.label}</span>
+                <span className="mx-2 text-gray-300">•</span>
+                Coach AI:{" "}
+                <span className="font-semibold text-black">
+                  {tier.limits.coachAi ? `${tier.limits.coachRateLimitPer10Min} requests / 10m` : "Locked"}
+                </span>
               </div>
 
               <div className="mt-5 grid gap-3 sm:grid-cols-2">

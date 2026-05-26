@@ -11,6 +11,7 @@ import {
   type EngagementStatus,
 } from "../lib/engagement";
 import { getDurableEngagementSnapshot } from "../lib/engagementDurable";
+import { normalizePlanTier, tierDefinition } from "../lib/productTiers";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 import { IdentityStatusCard } from "../components/EngagementSystem";
 
@@ -22,6 +23,7 @@ type Profile = {
   weakest_area: string | null;
   current_level: string | null;
   exam_date: string | null;
+  plan_tier: string | null;
 };
 
 function isoToDateInput(iso: string | null): string {
@@ -87,6 +89,7 @@ export default function ProfilePage() {
   }, [daysLeft]);
 
   const displayName = useMemo(() => nickname.trim() || profile?.nickname?.trim() || "Student", [nickname, profile]);
+  const plan = useMemo(() => tierDefinition(normalizePlanTier(profile?.plan_tier ?? "free")), [profile?.plan_tier]);
 
   async function ensureAuth(): Promise<string | null> {
     const supabase = getSupabase();
@@ -109,15 +112,24 @@ export default function ProfilePage() {
       if (!userId) return;
 
       const supabase = getSupabase();
-      const { data, error } = await supabase
+      let res = await supabase
         .from("profiles")
-        .select("id,nickname,target_score,daily_study_hours,weakest_area,current_level,exam_date")
+        .select("id,nickname,target_score,daily_study_hours,weakest_area,current_level,exam_date,plan_tier")
         .eq("id", userId)
         .single();
 
-      if (error) throw new Error(error.message);
+      if (res.error && String(res.error.message || "").toLowerCase().includes("plan_tier")) {
+        res = await supabase
+          .from("profiles")
+          .select("id,nickname,target_score,daily_study_hours,weakest_area,current_level,exam_date")
+          .eq("id", userId)
+          .single();
+      }
 
-      const p = data as Profile;
+      if (res.error) throw new Error(res.error.message);
+
+      const base = res.data as Omit<Profile, "plan_tier"> & { plan_tier?: string | null };
+      const p = { ...base, plan_tier: base.plan_tier ?? "free" } as Profile;
       setProfile(p);
 
       try {
@@ -259,9 +271,10 @@ export default function ProfilePage() {
             )}
 
             {/* Quick summary row */}
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-4 sm:grid-cols-3">
               <StatBox label="Name" value={displayName} hint="Shown in community" />
               <StatBox label="Target" value={`${clampNumberString(targetScore, 800, 1600, 1400)}`} hint="Goal (not prediction)" />
+              <StatBox label="Plan" value={plan.label} hint={plan.tagline} accent={plan.key !== "free"} />
             </div>
 
             {/* Form */}
@@ -314,6 +327,7 @@ export default function ProfilePage() {
                 {saving ? "Saving…" : "Save changes"}
               </PrimaryButton>
               <SecondaryButton href="/today">Back to Today</SecondaryButton>
+              <SecondaryButton href="/pricing">Manage plan</SecondaryButton>
             </div>
 
             <div className="flex gap-4 text-sm">

@@ -11,61 +11,55 @@ import {
   weaknessScore,
   type SkillRow as SharedSkillRow,
 } from "../lib/learningSignals";
-import { ActionDock, Card, LoopRail, PageHeader, PagePurpose, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import {
+  focusedLessonHref,
+  focusedPracticeHref,
+  masteryDescription,
+  masteryFor,
+  masteryTone,
+  movementDescription,
+  movementFor,
+  movementTone,
+  type MasteryState,
+  type MovementState,
+} from "../lib/mastery";
+import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Row = SharedSkillRow;
+type StateFilter = "All" | MasteryState;
 
-type DomainSummary = {
-  domain: string;
-  count: number;
-  avgAccuracy: number;
-  weakest: Row | null;
+type DecoratedRow = Row & {
+  key: string;
+  mastery: MasteryState;
+  movement: MovementState;
 };
 
-function groupByDomain(rows: Row[]) {
-  const map = new Map<string, Row[]>();
+const MASTERY_ORDER: MasteryState[] = ["Unstable", "Growing", "Mastered", "Untouched"];
 
-  for (const row of rows) {
-    const key = row.domain || "Other";
-    if (!map.has(key)) map.set(key, []);
-    map.get(key)!.push(row);
-  }
-
-  return [...map.entries()]
-    .map(([domain, rows]) => ({
-      domain,
-      rows: [...rows].sort((a, b) => {
-        const aScore = weaknessScore(a);
-        const bScore = weaknessScore(b);
-        if (aScore !== bScore) return aScore - bScore;
-        return a.subskill.localeCompare(b.subskill);
-      }),
-    }))
-    .sort((a, b) => a.domain.localeCompare(b.domain));
+function rowKey(row: Row): string {
+  return `${row.domain || "Other"}::${row.subskill}`;
 }
 
-function buildDomainSummaries(rows: Row[]): DomainSummary[] {
-  const grouped = groupByDomain(rows);
+function sortForExecution(rows: DecoratedRow[]): DecoratedRow[] {
+  const stateRank = new Map<MasteryState, number>([
+    ["Unstable", 0],
+    ["Growing", 1],
+    ["Untouched", 2],
+    ["Mastered", 3],
+  ]);
 
-  return grouped
-    .map(({ domain, rows }) => {
-      const count = rows.length;
-      const avgAccuracy =
-        count > 0
-          ? rows.reduce((sum, r) => sum + (r.accuracy ?? 0), 0) / count
-          : 0;
+  return [...rows].sort((a, b) => {
+    const aState = stateRank.get(a.mastery) ?? 99;
+    const bState = stateRank.get(b.mastery) ?? 99;
+    if (aState !== bState) return aState - bState;
 
-      return {
-        domain,
-        count,
-        avgAccuracy,
-        weakest: sortWeakest(rows)[0] ?? null,
-      };
-    })
-    .sort((a, b) => {
-      if (a.avgAccuracy !== b.avgAccuracy) return a.avgAccuracy - b.avgAccuracy;
-      return a.domain.localeCompare(b.domain);
-    });
+    const aScore = weaknessScore(a);
+    const bScore = weaknessScore(b);
+    if (aScore !== bScore) return aScore - bScore;
+
+    if ((a.attempts ?? 0) !== (b.attempts ?? 0)) return b.attempts - a.attempts;
+    return a.subskill.localeCompare(b.subskill);
+  });
 }
 
 export default function SkillsPage() {
@@ -74,6 +68,8 @@ export default function SkillsPage() {
   const [subject, setSubject] = useState<"Math" | "Reading">("Reading");
   const [rows, setRows] = useState<Row[]>([]);
   const [query, setQuery] = useState("");
+  const [stateFilter, setStateFilter] = useState<StateFilter>("Unstable");
+  const [focusKey, setFocusKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -83,7 +79,6 @@ export default function SkillsPage() {
 
     try {
       const supabase = getSupabase();
-
       const { data: sessionData, error: sessErr } = await supabase.auth.getSession();
       if (sessErr) throw new Error(sessErr.message);
 
@@ -98,8 +93,8 @@ export default function SkillsPage() {
 
       if (error) throw new Error(error.message);
       setRows((res ?? []) as Row[]);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load skills.");
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Failed to load skills.");
       setRows([]);
     } finally {
       setLoading(false);
@@ -107,36 +102,77 @@ export default function SkillsPage() {
   }
 
   useEffect(() => {
-    load();
+    void load();
+    setFocusKey(null);
+    setStateFilter("Unstable");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subject]);
 
+  const decorated = useMemo<DecoratedRow[]>(() => {
+    return rows.map((row) => ({
+      ...row,
+      key: rowKey(row),
+      mastery: masteryFor({ attempts: row.attempts, accuracy: row.accuracy }),
+      movement: movementFor({ attempts: row.attempts, accuracy: row.accuracy }),
+    }));
+  }, [rows]);
+
+  const stateCounts = useMemo(() => {
+    return {
+      Mastered: decorated.filter((row) => row.mastery === "Mastered").length,
+      Growing: decorated.filter((row) => row.mastery === "Growing").length,
+      Unstable: decorated.filter((row) => row.mastery === "Unstable").length,
+      Untouched: decorated.filter((row) => row.mastery === "Untouched").length,
+    };
+  }, [decorated]);
+
+  useEffect(() => {
+    if (stateFilter !== "Unstable") return;
+    if (stateCounts.Unstable > 0) return;
+    if (stateCounts.Growing > 0) {
+      setStateFilter("Growing");
+      return;
+    }
+    setStateFilter("All");
+  }, [stateCounts, stateFilter]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return rows;
+    return sortForExecution(
+      decorated.filter((row) => {
+        if (stateFilter !== "All" && row.mastery !== stateFilter) return false;
+        if (!q) return true;
+        const target = `${row.subskill} ${row.skill} ${row.domain}`.toLowerCase();
+        return target.includes(q);
+      })
+    );
+  }, [decorated, query, stateFilter]);
 
-    return rows.filter((r) => {
-      const subskill = r.subskill?.toLowerCase() ?? "";
-      const skill = r.skill?.toLowerCase() ?? "";
-      const domain = r.domain?.toLowerCase() ?? "";
-      return subskill.includes(q) || skill.includes(q) || domain.includes(q);
-    });
-  }, [rows, query]);
+  const focusRow = useMemo(() => {
+    const selected = focusKey ? decorated.find((row) => row.key === focusKey) ?? null : null;
+    if (selected) return selected;
+    return (
+      sortForExecution(decorated).find((row) => row.mastery === "Unstable") ||
+      sortForExecution(decorated).find((row) => row.mastery === "Growing") ||
+      sortForExecution(decorated)[0] ||
+      null
+    );
+  }, [decorated, focusKey]);
 
   const weakest3 = useMemo(() => sortWeakest(rows).slice(0, 3), [rows]);
-  const topWeak = weakest3[0] ?? null;
-  const domainSummaries = useMemo(() => buildDomainSummaries(rows), [rows]);
-  const groupedFiltered = useMemo(() => groupByDomain(filtered), [filtered]);
 
-  const stableSignalCount = useMemo(() => rows.filter((r) => r.attempts >= 6).length, [rows]);
-  const lowSignalCount = useMemo(() => rows.filter((r) => r.attempts < 6).length, [rows]);
+  const blockedRows = useMemo(() => {
+    return decorated.filter((row) => row.movement === "Stuck").slice(0, 3);
+  }, [decorated]);
+
+  const missionNext = focusRow ? "Lessons" : "Practice";
 
   return (
     <main className="min-h-screen">
       <PageHeader
-        label="Diagnostic workspace"
+        label="Mastery command"
         title="Skills"
-        subtitle="Find the weakest signal, repair it, then re-test it."
+        subtitle="Pick one exact subtopic, execute, and verify movement."
         right={
           <div className="flex gap-2">
             <button
@@ -163,19 +199,14 @@ export default function SkillsPage() {
         }
       />
 
-      <LoopRail active="Skills" next={topWeak ? "Lessons" : "Practice"} note="Use this page to choose one repair target, not five." />
-      <PagePurpose
-        purpose="Skills ranks what is weak."
-        instruction={
-          topWeak
-            ? `Fix one target first: ${topWeak.subskill}.`
-            : "Generate a little more practice signal so weak-zone ranking becomes reliable."
-        }
-        why="Diagnostics only matter when they immediately drive your next block."
+      <LoopRail
+        active="Skills"
+        next={missionNext}
+        note="Use this page as a precision selector, not as a report."
       />
 
       {loading && (
-        <Card title="Loading…" subtitle="Pulling your mastery data">
+        <Card title="Loading…" subtitle="Pulling your mastery map">
           <div className="text-sm text-gray-600">Please wait.</div>
         </Card>
       )}
@@ -191,11 +222,8 @@ export default function SkillsPage() {
       )}
 
       {!loading && !err && rows.length === 0 && (
-        <Card title="No skill signal yet" subtitle="You need at least one practice set first.">
-          <div className="text-sm text-gray-700">
-            This page becomes useful only after ALGA sees enough question-level performance to rank weak areas.
-          </div>
-          <div className="mt-4 grid gap-3">
+        <Card title="No mastery signal yet" subtitle="Run one full set before using diagnostics.">
+          <div className="grid gap-3 sm:grid-cols-2">
             <PrimaryButton href={`/practice?subject=${subject}`}>Start practice (12Q)</PrimaryButton>
             <SecondaryButton href="/today">Back to Today</SecondaryButton>
           </div>
@@ -203,234 +231,244 @@ export default function SkillsPage() {
       )}
 
       {!loading && !err && rows.length > 0 && (
-        <div className="grid gap-4">
-          <Card
-            title="This week’s repair plan"
-            subtitle="Best current fixes based on weakness and sample size."
-            right={<Pill text={subject} tone="accent" />}
-            accent
-          >
-            <div className="grid gap-3">
-              {weakest3.map((r, i) => (
-                <div
-                  key={`${r.subskill}-${i}`}
-                  className="rounded-2xl border border-[#d9e7ff] bg-gradient-to-r from-[#f8fbff] to-white p-5"
+        <div className="grid gap-5">
+          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
+            <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.2fr_0.8fr]">
+              <div>
+                <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
+                  Active focus target
+                </div>
+                {focusRow ? (
+                  <>
+                    <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+                      {focusRow.subskill}
+                    </h2>
+                    <p className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
+                      {focusRow.domain} • {focusRow.skill} • {masteryDescription(focusRow.mastery)}
+                    </p>
+                    <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
+                      <PrimaryButton href={focusedPracticeHref(subject, focusRow.subskill, true)}>
+                        Practice this subtopic
+                      </PrimaryButton>
+                      <SecondaryButton href={focusedLessonHref(focusRow.subskill)}>
+                        Open lesson
+                      </SecondaryButton>
+                    </div>
+                  </>
+                ) : (
+                  <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">Choose a subtopic</h2>
+                )}
+              </div>
+
+              <div className="grid gap-3">
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Unstable now</div>
+                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{stateCounts.Unstable}</div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">Highest-priority repair queue</div>
+                </div>
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Growing</div>
+                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{stateCounts.Growing}</div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">Close to stable control</div>
+                </div>
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Mastered</div>
+                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{stateCounts.Mastered}</div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">Maintain with light retests</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <Card title="Mastery state map" subtitle="Filter by state, then select one subtopic to execute." accent>
+            <div className="grid gap-4">
+              <div className="grid gap-3 md:grid-cols-[auto_1fr] md:items-center">
+                <div className="flex flex-wrap gap-2">
+                  {(["All", ...MASTERY_ORDER] as const).map((state) => {
+                    const active = stateFilter === state;
+                    const count =
+                      state === "All" ? decorated.length : stateCounts[state as MasteryState];
+
+                    return (
+                      <button
+                        key={state}
+                        onClick={() => setStateFilter(state)}
+                        className={[
+                          "rounded-full border px-3 py-1 text-xs font-semibold transition",
+                          active
+                            ? "border-[#0e1b34] bg-[#0e1b34] text-white"
+                            : "border-gray-300 bg-white text-gray-700 hover:border-gray-400",
+                        ].join(" ")}
+                      >
+                        {state} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <input
+                  className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none"
+                  placeholder="Search subskill / skill / domain"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                />
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-[1.08fr_0.92fr]">
+                <div className="grid gap-2">
+                  {filtered.length === 0 && (
+                    <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-600">
+                      No subskills match the current filter.
+                    </div>
+                  )}
+
+                  {filtered.map((row) => {
+                    const active = focusRow?.key === row.key;
+                    return (
+                      <button
+                        key={row.key}
+                        onClick={() => setFocusKey(row.key)}
+                        className={[
+                          "rounded-2xl border p-4 text-left transition",
+                          active
+                            ? "border-[#0f1b33] bg-[#edf5ff]"
+                            : "border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50",
+                        ].join(" ")}
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-semibold text-black">{row.subskill}</div>
+                            <div className="mt-1 text-xs text-gray-600">
+                              {row.domain} • {row.skill}
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <Pill text={row.mastery} tone={masteryTone(row.mastery)} />
+                            <Pill text={row.movement} tone={movementTone(row.movement)} />
+                          </div>
+                        </div>
+
+                        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                          <div className="text-xs text-gray-600">
+                            Accuracy <span className="font-semibold text-black">{pct(row.accuracy)}%</span>
+                          </div>
+                          <div className="text-xs text-gray-600">
+                            Attempts <span className="font-semibold text-black">{row.attempts}</span>
+                          </div>
+                          <div className="text-xs text-gray-600">
+                            Confidence <span className="font-semibold text-black">{confidenceLabel(row.attempts)}</span>
+                          </div>
+                        </div>
+
+                        <div className="mt-3 h-2 rounded-full bg-gray-100">
+                          <div
+                            className={`h-full rounded-full ${
+                              row.mastery === "Mastered"
+                                ? "bg-[#2a9b67]"
+                                : row.mastery === "Growing"
+                                ? "bg-[#4a7fd8]"
+                                : row.mastery === "Unstable"
+                                ? "bg-[#d54768]"
+                                : "bg-gray-400"
+                            }`}
+                            style={{ width: `${Math.max(6, Math.min(100, pct(row.accuracy)))}%` }}
+                          />
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <Card
+                  title="Focused execution"
+                  subtitle={focusRow ? movementDescription(focusRow.movement) : "Pick one row from the left."}
+                  right={focusRow ? <Pill text={focusRow.mastery} tone={masteryTone(focusRow.mastery)} /> : null}
+                  prominence="prominent"
+                  accent
                 >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-3">
-                        <div className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[#c7dbff] bg-[#eef4ff] text-sm font-semibold text-[#004aad]">
-                          {i + 1}
+                  {focusRow ? (
+                    <div className="grid gap-4">
+                      <div>
+                        <div className="text-xl font-semibold text-black">{focusRow.subskill}</div>
+                        <div className="mt-1 text-sm text-gray-600">
+                          {focusRow.domain} • {focusRow.skill}
                         </div>
-                        <div className="text-base font-semibold text-black">{r.subskill}</div>
                       </div>
 
-                      <div className="mt-2 text-xs text-gray-600">
-                        {r.domain} • {r.skill}
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <StatBox label="Accuracy" value={`${pct(focusRow.accuracy)}%`} hint="Current signal" accent={focusRow.mastery !== "Unstable"} />
+                        <StatBox label="Attempts" value={`${focusRow.attempts}`} hint={confidenceLabel(focusRow.attempts)} />
                       </div>
 
-                      <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                        <div className="rounded-xl border border-gray-200 bg-white px-3 py-3">
-                          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-gray-500">
-                            Accuracy
-                          </div>
-                          <div className="mt-1 text-lg font-semibold text-black">{pct(r.accuracy)}%</div>
-                        </div>
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                        {masteryDescription(focusRow.mastery)}
+                      </div>
 
-                        <div className="rounded-xl border border-gray-200 bg-white px-3 py-3">
-                          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-gray-500">
-                            Attempts
-                          </div>
-                          <div className="mt-1 text-lg font-semibold text-black">{r.attempts}</div>
-                        </div>
-
-                        <div className="rounded-xl border border-gray-200 bg-white px-3 py-3">
-                          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-gray-500">
-                            Confidence
-                          </div>
-                          <div className="mt-1 text-lg font-semibold text-[#004aad]">
-                            {confidenceLabel(r.attempts)}
-                          </div>
-                        </div>
+                      <div className="grid gap-3">
+                        <PrimaryButton href={focusedPracticeHref(subject, focusRow.subskill, true)}>
+                          Run focused practice
+                        </PrimaryButton>
+                        <SecondaryButton href={focusedLessonHref(focusRow.subskill)}>
+                          Open repair lesson
+                        </SecondaryButton>
+                        <SecondaryButton href="/review">Open recovery queue</SecondaryButton>
                       </div>
                     </div>
-                  </div>
-
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    <PrimaryButton href={`/practice?subject=${subject}&subskill=${encodeURIComponent(r.subskill)}`}>
-                      Practice this
-                    </PrimaryButton>
-                    <SecondaryButton href={`/lesson/${encodeURIComponent(r.subskill)}`}>
-                      Open lesson
-                    </SecondaryButton>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-4 text-xs text-gray-500">
-              Low-confidence weakness does not mean “ignore it.” It means “collect more evidence before making a hard judgment.”
+                  ) : (
+                    <div className="text-sm text-gray-600">No subtopic selected.</div>
+                  )}
+                </Card>
+              </div>
             </div>
           </Card>
 
-          <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
-            <Card title="Signal quality" subtitle="Not every weak signal is equally trustworthy.">
-              <div className="grid gap-4 sm:grid-cols-3">
-                <StatBox
-                  label="Tracked subskills"
-                  value={String(rows.length)}
-                  hint="Currently visible rows"
-                />
-                <StatBox
-                  label="Stable signal"
-                  value={String(stableSignalCount)}
-                  hint="At least 6 attempts"
-                  accent
-                />
-                <StatBox
-                  label="Low signal"
-                  value={String(lowSignalCount)}
-                  hint="Needs more attempts"
-                />
-              </div>
-
-              <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
-                Use stable signal to prioritize. Use low signal as a warning, not a final verdict.
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card title="Most blocked subtopics" subtitle="Where performance is not moving despite volume.">
+              <div className="grid gap-2">
+                {blockedRows.length === 0 && (
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+                    No subtopic is currently flagged as blocked.
+                  </div>
+                )}
+                {blockedRows.map((row) => (
+                  <button
+                    key={`blocked-${row.key}`}
+                    onClick={() => setFocusKey(row.key)}
+                    className="rounded-xl border border-gray-200 bg-white p-3 text-left transition hover:border-gray-300"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-semibold text-black">{row.subskill}</div>
+                      <Pill text="Stuck" tone="danger" />
+                    </div>
+                    <div className="mt-1 text-xs text-gray-600">
+                      {pct(row.accuracy)}% over {row.attempts} attempts
+                    </div>
+                  </button>
+                ))}
               </div>
             </Card>
 
-            <Card
-              title="Domain summary"
-              subtitle="Weakness is easier to understand when grouped by domain."
-              right={<Pill text={`${domainSummaries.length} domains`} />}
-            >
-              <div className="grid gap-3">
-                {domainSummaries.map((d) => (
-                  <div key={d.domain} className="rounded-xl border border-gray-200 bg-white p-4">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <div className="font-semibold text-black">{d.domain}</div>
-                        <div className="mt-1 text-sm text-gray-700">
-                          Average accuracy {pct(d.avgAccuracy)}% across {d.count} subskills
-                        </div>
-                        {d.weakest && (
-                          <div className="mt-2 text-xs text-gray-600">
-                            Weakest here: {d.weakest.subskill} ({pct(d.weakest.accuracy)}%, n={d.weakest.attempts})
-                          </div>
-                        )}
-                      </div>
-
-                      {d.weakest ? (
-                        <a
-                          href={`/practice?subject=${subject}&subskill=${encodeURIComponent(d.weakest.subskill)}`}
-                          className="inline-flex items-center rounded-full border border-[#c7dbff] bg-[#eef4ff] px-3 py-1 text-xs font-semibold text-[#004aad] transition hover:bg-[#dfeeff]"
-                        >
-                          Fix weakest
-                        </a>
-                      ) : null}
+            <Card title="Immediate repair queue" subtitle="Top execution targets right now.">
+              <div className="grid gap-2">
+                {weakest3.map((row, i) => (
+                  <button
+                    key={`weak-${rowKey(row)}-${i}`}
+                    onClick={() => setFocusKey(rowKey(row))}
+                    className="rounded-xl border border-gray-200 bg-white p-3 text-left transition hover:border-gray-300"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-semibold text-black">{row.subskill}</div>
+                      <div className="text-xs font-semibold text-gray-500">#{i + 1}</div>
                     </div>
-                  </div>
+                    <div className="mt-1 text-xs text-gray-600">
+                      {pct(row.accuracy)}% • {row.attempts} attempts • {confidenceLabel(row.attempts)} confidence
+                    </div>
+                  </button>
                 ))}
               </div>
             </Card>
           </div>
-
-          <Card
-            title="Mastery map"
-            subtitle="Search, inspect, and choose what to repair next."
-            right={<Pill text={`${filtered.length} visible`} />}
-          >
-            <div className="flex flex-col gap-4">
-              <input
-                className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none focus:border-[#004aad]"
-                placeholder="Search subskill / skill / domain…"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-
-              {!loading && !err && filtered.length === 0 && (
-                <div className="text-sm text-gray-600">
-                  No matches for “{query.trim()}”.
-                </div>
-              )}
-
-              {!loading && !err && filtered.length > 0 && (
-                <div className="grid gap-4">
-                  {groupedFiltered.map(({ domain, rows }) => (
-                    <div key={domain} className="overflow-hidden rounded-2xl border border-gray-200">
-                      <div className="border-b border-gray-200 bg-gradient-to-r from-[#f8fbff] to-white px-4 py-3">
-                        <div className="text-sm font-semibold text-black">{domain}</div>
-                        <div className="mt-1 text-xs text-gray-600">
-                          {rows.length} visible subskills
-                        </div>
-                      </div>
-
-                      <ul className="divide-y divide-gray-200 bg-white">
-                        {rows.map((r, i) => (
-                          <li
-                            key={`${domain}-${r.subskill}-${i}`}
-                            className="flex items-start justify-between gap-4 px-4 py-4"
-                          >
-                            <div className="min-w-0">
-                              <div className="font-medium text-black">{r.subskill}</div>
-                              <div className="mt-1 text-xs text-gray-600">
-                                {r.skill} • {pct(r.accuracy)}% (n={r.attempts}) • {confidenceLabel(r.attempts)}
-                              </div>
-                            </div>
-
-                            <div className="flex flex-col items-end gap-2">
-                              <a
-                                className="text-sm font-semibold text-[#004aad] underline hover:text-[#003b88]"
-                                href={`/practice?subject=${subject}&subskill=${encodeURIComponent(r.subskill)}`}
-                              >
-                                Practice
-                              </a>
-                              <a
-                                className="text-xs text-gray-500 underline hover:text-black"
-                                href={`/lesson/${encodeURIComponent(r.subskill)}`}
-                              >
-                                Lesson
-                              </a>
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="text-xs text-gray-500">
-                This is a diagnostic layer, not a vanity layer. Use it to choose what to repair next.
-              </div>
-            </div>
-          </Card>
         </div>
-      )}
-
-      {!loading && !err && (
-        <ActionDock
-          title="Diagnostic next action"
-          note={
-            topWeak
-              ? `${topWeak.subskill}: ${pct(topWeak.accuracy)}% over ${topWeak.attempts} attempts.`
-              : "No stable weak row yet."
-          }
-          primary={{
-            label: topWeak ? "Practice top weak zone" : `Start ${subject} practice`,
-            href: topWeak
-              ? `/practice?subject=${subject}&subskill=${encodeURIComponent(topWeak.subskill)}`
-              : `/practice?subject=${subject}`,
-          }}
-          secondary={
-            topWeak
-              ? {
-                  label: "Open matching lesson",
-                  href: `/lesson/${encodeURIComponent(topWeak.subskill)}`,
-                }
-              : { label: "Back to Today", href: "/today" }
-          }
-        />
       )}
     </main>
   );

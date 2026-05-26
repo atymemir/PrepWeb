@@ -4,7 +4,7 @@ export const dynamic = 'force-dynamic';
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
-import { analyzeReviewSession } from "../lib/sessionAnalysis";
+import { analyzeReviewSession, type SessionAnalysis } from "../lib/sessionAnalysis";
 import { requestQuestionExplanation, type AiExplanation } from "../lib/questionExplanation";
 import { errorMessage } from "../lib/errors";
 import { recordAnswerEvent } from "../lib/answerEvents";
@@ -23,6 +23,7 @@ import {
   recordDurableEngagementSession,
 } from "../lib/engagementDurable";
 import { recordStudySession } from "../lib/sessionHistory";
+import { focusedLessonHref, focusedPracticeHref } from "../lib/mastery";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 import QuestionActionBlock from "../components/QuestionActionBlock";
 import { SessionPayoffCard } from "../components/EngagementSystem";
@@ -85,6 +86,23 @@ function reviewReasonFor(args: {
   return "new mistake";
 }
 
+function reviewReasonLabel(
+  reason: "new mistake" | "failed recovery" | "low-confidence recovery" | "repeated relapse"
+): string {
+  if (reason === "failed recovery") return "Failed recovery";
+  if (reason === "repeated relapse") return "Repeated relapse";
+  if (reason === "low-confidence recovery") return "Low confidence";
+  return "New mistake";
+}
+
+function reviewReasonTone(
+  reason: "new mistake" | "failed recovery" | "low-confidence recovery" | "repeated relapse"
+): "neutral" | "accent" | "danger" {
+  if (reason === "failed recovery" || reason === "repeated relapse") return "danger";
+  if (reason === "low-confidence recovery") return "accent";
+  return "neutral";
+}
+
 export default function ReviewPage() {
   const router = useRouter();
   const limit = 12;
@@ -126,6 +144,10 @@ export default function ReviewPage() {
   const [engagementNotice, setEngagementNotice] = useState<string | null>(null);
   const [historySessionId, setHistorySessionId] = useState<string | null>(null);
   const [reviewStartedAtMs, setReviewStartedAtMs] = useState<number>(() => Date.now());
+  const [finalAnalysis, setFinalAnalysis] = useState<SessionAnalysis | null>(null);
+  const [queueStartCount, setQueueStartCount] = useState<number | null>(null);
+  const [queueAfterCount, setQueueAfterCount] = useState<number | null>(null);
+  const [postSessionNotice, setPostSessionNotice] = useState<string | null>(null);
 
   const lastSubmitRef = useRef<{
     questionId: string;
@@ -147,7 +169,8 @@ export default function ReviewPage() {
     );
   }, [answers]);
 
-  const accuracyPct = reviewAnalysis.accuracyPct;
+  const analysis = finalAnalysis ?? reviewAnalysis;
+  const accuracyPct = analysis.accuracyPct;
 
   const queueTone = useMemo(() => {
     if (questions.length === 0) return "success" as const;
@@ -161,7 +184,7 @@ export default function ReviewPage() {
     return reviewReasonFor({ question: q, questions, answers });
   }, [q, questions, answers]);
 
-  const repairTopic = reviewAnalysis.primaryRepairTarget?.topic ?? null;
+  const repairTopic = analysis.primaryRepairTarget?.topic ?? null;
   const repairSubject = useMemo(() => {
     if (!repairTopic) return "Reading";
     const found = Object.values(answers).find(
@@ -172,23 +195,120 @@ export default function ReviewPage() {
 
   const repairLessonHref = useMemo(() => {
     if (!repairTopic) return "/lessons";
-    return `/lesson/${encodeURIComponent(repairTopic)}`;
+    return focusedLessonHref(repairTopic);
   }, [repairTopic]);
 
   const repairPracticeHref = useMemo(() => {
     if (!repairTopic) return "/practice?subject=Reading";
-    return `/practice?subject=${repairSubject}&subskill=${encodeURIComponent(repairTopic)}`;
+    return focusedPracticeHref(repairSubject, repairTopic, true);
   }, [repairTopic, repairSubject]);
 
   const outcomePill = useMemo(() => {
-    if (reviewAnalysis.outcome === "rebuild") {
+    if (analysis.outcome === "rebuild") {
       return { text: "Rebuild", tone: "danger" as const };
     }
-    if (reviewAnalysis.outcome === "stabilize") {
+    if (analysis.outcome === "stabilize") {
       return { text: "Stabilize", tone: "accent" as const };
     }
     return { text: "Advance", tone: "success" as const };
-  }, [reviewAnalysis.outcome]);
+  }, [analysis.outcome]);
+
+  const queueTopicBuckets = useMemo(() => {
+    const buckets = new Map<string, { topic: string; subject: string; count: number }>();
+    for (const question of questions) {
+      const topic = topicKey(question.topic);
+      const key = `${question.subject}:${topic}`;
+      if (!buckets.has(key)) {
+        buckets.set(key, { topic, subject: question.subject || "Reading", count: 0 });
+      }
+      buckets.get(key)!.count += 1;
+    }
+    return [...buckets.values()].sort((a, b) => {
+      if (a.count !== b.count) return b.count - a.count;
+      return a.topic.localeCompare(b.topic);
+    });
+  }, [questions]);
+
+  const queueSubjectBuckets = useMemo(() => {
+    const buckets = new Map<string, number>();
+    for (const question of questions) {
+      const subject = question.subject || "Reading";
+      buckets.set(subject, (buckets.get(subject) ?? 0) + 1);
+    }
+    return [...buckets.entries()]
+      .map(([subject, count]) => ({ subject, count }))
+      .sort((a, b) => b.count - a.count);
+  }, [questions]);
+
+  const liveRemainingDebt = useMemo(
+    () => Math.max(total - analysis.reviewedCount, 0),
+    [total, analysis.reviewedCount]
+  );
+
+  const recoveryRatePct = useMemo(() => {
+    if (analysis.reviewedCount === 0) return 0;
+    return Math.round((analysis.correctCount / analysis.reviewedCount) * 100);
+  }, [analysis.correctCount, analysis.reviewedCount]);
+
+  const debtDelta = useMemo(() => {
+    if (queueStartCount === null || queueAfterCount === null) return null;
+    return queueStartCount - queueAfterCount;
+  }, [queueAfterCount, queueStartCount]);
+
+  const nextRecoveryRoute = useMemo(() => {
+    if ((queueAfterCount ?? 0) > 0) {
+      return {
+        note: "Recovery queue still has due items. Keep clearing debt before forward volume.",
+        primaryHref: "/review",
+        primaryLabel: "Continue recovery queue",
+        secondaryHref: repairPracticeHref,
+        secondaryLabel: "Target failed topic",
+      };
+    }
+
+    if (analysis.outcome === "rebuild") {
+      return {
+        note: "Rebuild route: lesson first, then targeted practice.",
+        primaryHref: repairLessonHref,
+        primaryLabel: "Open lesson",
+        secondaryHref: repairPracticeHref,
+        secondaryLabel: "Run targeted practice",
+      };
+    }
+
+    if (analysis.outcome === "stabilize") {
+      return {
+        note: "Stabilize route: one focused practice set on failed topic.",
+        primaryHref: repairPracticeHref,
+        primaryLabel: "Run targeted practice",
+        secondaryHref: "/review",
+        secondaryLabel: "Re-check due queue",
+      };
+    }
+
+    return {
+      note: "Advance route: return to forward practice, keep review active.",
+      primaryHref: "/practice?subject=Reading",
+      primaryLabel: "Return to practice",
+      secondaryHref: "/review",
+      secondaryLabel: "Check due queue",
+    };
+  }, [queueAfterCount, repairPracticeHref, analysis.outcome, repairLessonHref]);
+
+  const failedTopicRoutes = useMemo(() => {
+    return analysis.failedTopics.slice(0, 2).map((topic) => {
+      const match = Object.values(answers).find(
+        (answer) => (answer.topic?.trim() || "Unknown") === topic.topic
+      );
+      const subject = (match?.subject as "Reading" | "Math") || "Reading";
+      return {
+        ...topic,
+        subject,
+        practiceHref: focusedPracticeHref(subject, topic.topic, true),
+        lessonHref: focusedLessonHref(topic.topic),
+      };
+    });
+  }, [answers, analysis.failedTopics]);
 
   function optionText(letter: string) {
     if (!q) return "";
@@ -233,6 +353,9 @@ export default function ReviewPage() {
     resetQuestionUI();
     setAnswers({});
     setHistorySessionId(null);
+    setFinalAnalysis(null);
+    setQueueAfterCount(null);
+    setPostSessionNotice(null);
     lastSubmitRef.current = null;
 
     try {
@@ -256,6 +379,7 @@ export default function ReviewPage() {
 
       const list = (data ?? []) as Question[];
       setQuestions(list);
+      setQueueStartCount(list.length);
       setMomentum(createMomentum(list.length || limit));
       setSessionPayoff(null);
       setShareText("");
@@ -279,6 +403,10 @@ export default function ReviewPage() {
     setSessionClientId(createClientSessionId());
     setHistorySessionId(null);
     setReviewStartedAtMs(Date.now());
+    setQueueStartCount(questions.length);
+    setFinalAnalysis(null);
+    setQueueAfterCount(null);
+    setPostSessionNotice(null);
     resetQuestionUI();
     setAnswers({});
     lastSubmitRef.current = null;
@@ -456,8 +584,19 @@ export default function ReviewPage() {
   }
 
   async function finishReviewSession() {
-    const answered = Object.keys(answers).length;
-    const correct = Object.values(answers).filter((answer) => answer.correct).length;
+    const source = { ...answers };
+    const answered = Object.keys(source).length;
+    const correct = Object.values(source).filter((answer) => answer.correct).length;
+    const sourceAnalysis = analyzeReviewSession(
+      Object.entries(source).map(([questionId, value]) => ({
+        questionId,
+        subject: value.subject,
+        topic: value.topic,
+        correct: value.correct,
+      }))
+    );
+    setFinalAnalysis(sourceAnalysis);
+    setPostSessionNotice(null);
 
     try {
       const applied = await recordDurableEngagementSession({
@@ -496,10 +635,20 @@ export default function ReviewPage() {
         answeredCount: answered,
         correctCount: correct,
         durationSeconds: Math.max(0, Math.round((Date.now() - reviewStartedAtMs) / 1000)),
-        outcome: reviewAnalysis.outcome,
-        topics: buildTopicSnapshots(answers),
+        outcome: sourceAnalysis.outcome,
+        topics: buildTopicSnapshots(source),
       });
       setHistorySessionId(history.sessionId);
+
+      try {
+        const supabase = getSupabase();
+        const dueRes = await supabase.rpc("get_due_review_questions", { p_limit: 120 });
+        if (dueRes.error) throw new Error(dueRes.error.message);
+        setQueueAfterCount(((dueRes.data ?? []) as Question[]).length);
+      } catch (postErr: unknown) {
+        setQueueAfterCount(null);
+        setPostSessionNotice(errorMessage(postErr, "Post-session queue snapshot is unavailable."));
+      }
     } catch (e: unknown) {
       setSessionPayoff(null);
       setEngagementNotice(
@@ -520,6 +669,13 @@ export default function ReviewPage() {
     }
 
     setIdx((i) => i + 1);
+    resetQuestionUI();
+    lastSubmitRef.current = null;
+  }
+
+  function previousQuestion() {
+    if (idx <= 0) return;
+    setIdx((i) => Math.max(0, i - 1));
     resetQuestionUI();
     lastSubmitRef.current = null;
   }
@@ -636,6 +792,46 @@ export default function ReviewPage() {
                   </div>
                 </section>
 
+                <div className="mt-4 grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+                  <div className="rounded-2xl border border-gray-200 bg-white p-4">
+                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                      Due topics now
+                    </div>
+                    <div className="mt-3 grid gap-2">
+                      {queueTopicBuckets.slice(0, 4).map((bucket) => (
+                        <div
+                          key={`${bucket.subject}-${bucket.topic}`}
+                          className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700"
+                        >
+                          <span className="font-semibold text-black">{bucket.topic}</span>
+                          <span className="mx-1 text-gray-300">•</span>
+                          {bucket.subject}
+                          <span className="mx-1 text-gray-300">•</span>
+                          {bucket.count} due
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-gray-200 bg-white p-4">
+                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                      Queue subject split
+                    </div>
+                    <div className="mt-3 grid gap-2">
+                      {queueSubjectBuckets.map((bucket) => (
+                        <div
+                          key={bucket.subject}
+                          className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700"
+                        >
+                          <span className="font-semibold text-black">{bucket.subject}</span>
+                          <span className="mx-1 text-gray-300">•</span>
+                          {bucket.count} item{bucket.count === 1 ? "" : "s"}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
                 <div className="mt-5 grid gap-3 sm:grid-cols-2">
                   <PrimaryButton onClick={startSession}>Start review</PrimaryButton>
                   <SecondaryButton href="/today">Back to Today</SecondaryButton>
@@ -661,17 +857,26 @@ export default function ReviewPage() {
             <div className="mt-3 h-2.5 rounded-full bg-white/10">
               <div className="h-full rounded-full bg-[linear-gradient(90deg,#7eb5ff,#b9d9ff)]" style={{ width: `${momentum.progressPct}%` }} />
             </div>
-            <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-[#c8d4ed]">
-              <div>Cleared {reviewAnalysis.reviewedCount}</div>
-              <div>Correct {reviewAnalysis.correctCount}</div>
-              <div className="text-right">Remaining {Math.max(total - reviewAnalysis.reviewedCount, 0)}</div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-[#c8d4ed] sm:grid-cols-4">
+              <div>Cleared {analysis.reviewedCount}</div>
+              <div>Correct {analysis.correctCount}</div>
+              <div>Remaining {liveRemainingDebt}</div>
+              <div className="sm:text-right">Recovery {recoveryRatePct}%</div>
+            </div>
+            <div className="mt-2 text-xs text-[#a2b5d8]">
+              Queue pressure: {queueLabel(Math.max(queueStartCount ?? total, 0))}
             </div>
           </div>
 
           <Card
             title={`Recovery item ${idx + 1}`}
-            subtitle={`Why this is here: ${currentReviewReason ?? "new mistake"} • Accuracy so far: ${accuracyPct}%`}
-            right={<Pill text={currentReviewReason ?? "Review mode"} tone="accent" />}
+            subtitle={`Reason: ${currentReviewReason ? reviewReasonLabel(currentReviewReason) : "Review item"} • Accuracy so far: ${accuracyPct}%`}
+            right={
+              <Pill
+                text={currentReviewReason ? reviewReasonLabel(currentReviewReason) : "Review mode"}
+                tone={currentReviewReason ? reviewReasonTone(currentReviewReason) : "accent"}
+              />
+            }
             accent
             prominence="prominent"
           >
@@ -772,6 +977,42 @@ export default function ReviewPage() {
               )}
             </div>
           </Card>
+
+          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-gray-200 bg-[rgba(248,251,255,0.98)] px-4 pb-[calc(env(safe-area-inset-bottom)+0.7rem)] pt-3 shadow-xl backdrop-blur md:hidden">
+            <div className="mx-auto max-w-3xl rounded-2xl border border-white/90 bg-white/90 p-3">
+              <div className="mb-2 text-xs font-semibold text-[#0f172a]">
+                Recovery live • {analysis.reviewedCount}/{total} cleared
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  onClick={previousQuestion}
+                  disabled={idx <= 0 || saving}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <button
+                  onClick={() => {
+                    if (!locked) {
+                      void submit();
+                      return;
+                    }
+                    void nextOrFinish();
+                  }}
+                  disabled={saving || (!locked && !selected)}
+                  className="rounded-lg border border-[#0e1b34] bg-[#0e1b34] px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                >
+                  {!locked ? "Submit" : idx === total - 1 ? "Finish" : "Next"}
+                </button>
+                <button
+                  onClick={() => router.push("/today")}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700"
+                >
+                  Exit
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -789,10 +1030,10 @@ export default function ReviewPage() {
                 </p>
                 <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
                   <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
-                    Reviewed: <span className="font-semibold text-white">{reviewAnalysis.reviewedCount}</span>
+                    Reviewed: <span className="font-semibold text-white">{analysis.reviewedCount}</span>
                   </div>
                   <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
-                    Accuracy: <span className="font-semibold text-white">{reviewAnalysis.accuracyPct}%</span>
+                    Accuracy: <span className="font-semibold text-white">{analysis.accuracyPct}%</span>
                   </div>
                 </div>
               </div>
@@ -800,16 +1041,12 @@ export default function ReviewPage() {
                 <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
                   <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Recovered / unstable</div>
                   <div className="mt-2 text-3xl font-semibold tracking-tight text-white">
-                    {reviewAnalysis.correctCount} / {reviewAnalysis.incorrectCount}
+                    {analysis.correctCount} / {analysis.incorrectCount}
                   </div>
                 </div>
                 <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
                   <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Next move</div>
-                  <div className="mt-2 text-sm text-[#d2dbec]">
-                    {reviewAnalysis.outcome === "rebuild" && "Rebuild route: lesson first, then targeted practice."}
-                    {reviewAnalysis.outcome === "stabilize" && "Stabilize route: one focused practice set on failed topic."}
-                    {reviewAnalysis.outcome === "advance" && "Advance route: return to forward practice, keep review active."}
-                  </div>
+                  <div className="mt-2 text-sm text-[#d2dbec]">{nextRecoveryRoute.note}</div>
                 </div>
               </div>
             </div>
@@ -825,25 +1062,43 @@ export default function ReviewPage() {
             <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
               <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <StatBox label="Reviewed" value={`${reviewAnalysis.reviewedCount}`} hint="Items completed" />
-                  <StatBox label="Accuracy" value={`${reviewAnalysis.accuracyPct}%`} hint="This review block" accent={reviewAnalysis.accuracyPct >= 75} />
-                  <StatBox label="Recovered" value={`${reviewAnalysis.correctCount}`} hint="Correct recoveries" accent={reviewAnalysis.correctCount > 0} />
-                  <StatBox label="Still weak" value={`${reviewAnalysis.incorrectCount}`} hint="Needs more repair" accent={reviewAnalysis.incorrectCount > 0} />
+                  <StatBox label="Reviewed" value={`${analysis.reviewedCount}`} hint="Items completed" />
+                  <StatBox label="Accuracy" value={`${analysis.accuracyPct}%`} hint="This review block" accent={analysis.accuracyPct >= 75} />
+                  <StatBox label="Recovered" value={`${analysis.correctCount}`} hint="Correct recoveries" accent={analysis.correctCount > 0} />
+                  <StatBox label="Still weak" value={`${analysis.incorrectCount}`} hint="Needs more repair" accent={analysis.incorrectCount > 0} />
                 </div>
               </div>
 
               <div className="rounded-2xl border border-gray-200 bg-white p-5">
                 <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Next move</div>
-                <div className="mt-2 text-sm text-gray-700">
-                  {reviewAnalysis.outcome === "rebuild" && "Rebuild route: lesson first, then targeted practice."}
-                  {reviewAnalysis.outcome === "stabilize" && "Stabilize route: one focused practice set on failed topic."}
-                  {reviewAnalysis.outcome === "advance" && "Advance route: return to forward practice, keep review active."}
-                </div>
+                <div className="mt-2 text-sm text-gray-700">{nextRecoveryRoute.note}</div>
                 <div className="mt-4 grid gap-3">
-                  <PrimaryButton href={repairPracticeHref}>Run targeted practice</PrimaryButton>
-                  <SecondaryButton href={repairLessonHref}>Open lesson</SecondaryButton>
+                  <PrimaryButton href={nextRecoveryRoute.primaryHref}>{nextRecoveryRoute.primaryLabel}</PrimaryButton>
+                  <SecondaryButton href={nextRecoveryRoute.secondaryHref}>{nextRecoveryRoute.secondaryLabel}</SecondaryButton>
                 </div>
               </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                Debt impact from this block
+              </div>
+              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                  Queue before: <span className="font-semibold text-black">{queueStartCount ?? "—"}</span>
+                </div>
+                <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                  Queue after: <span className="font-semibold text-black">{queueAfterCount ?? "—"}</span>
+                </div>
+                <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                  Debt cleared: <span className="font-semibold text-black">{debtDelta ?? "—"}</span>
+                </div>
+              </div>
+              {postSessionNotice && (
+                <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  {postSessionNotice}
+                </div>
+              )}
             </div>
             {repairTopic && (
               <div className="mt-4 rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
@@ -853,22 +1108,43 @@ export default function ReviewPage() {
                 <div className="mt-2 text-lg font-semibold text-black">{repairTopic}</div>
                 <div className="mt-2 text-sm text-gray-700">
                   Subject: {repairSubject}
-                  {reviewAnalysis.primaryRepairTarget && (
+                  {analysis.primaryRepairTarget && (
                     <>
-                      {" "}• Accuracy in this session: {Math.round(reviewAnalysis.primaryRepairTarget.accuracy * 100)}%
-                      {" "}({reviewAnalysis.primaryRepairTarget.correct}/{reviewAnalysis.primaryRepairTarget.total})
+                      {" "}• Accuracy in this session: {Math.round(analysis.primaryRepairTarget.accuracy * 100)}%
+                      {" "}({analysis.primaryRepairTarget.correct}/{analysis.primaryRepairTarget.total})
                     </>
                   )}
                 </div>
               </div>
             )}
-            {reviewAnalysis.recoveredTopics.length > 0 && (
+            {failedTopicRoutes.length > 0 && (
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                  Repair routes from this block
+                </div>
+                <div className="mt-3 grid gap-3">
+                  {failedTopicRoutes.map((topic) => (
+                    <div key={`${topic.subject}-${topic.topic}`} className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                      <div className="text-sm font-semibold text-black">{topic.topic}</div>
+                      <div className="mt-1 text-xs text-gray-600">
+                        {topic.subject} • {Math.round(topic.accuracy * 100)}% ({topic.correct}/{topic.total})
+                      </div>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        <SecondaryButton href={topic.practiceHref}>Practice this topic</SecondaryButton>
+                        <SecondaryButton href={topic.lessonHref}>Open lesson</SecondaryButton>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {analysis.recoveredTopics.length > 0 && (
               <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
                 <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
                   Recovered cleanly
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  {reviewAnalysis.recoveredTopics.slice(0, 6).map((topic) => (
+                  {analysis.recoveredTopics.slice(0, 6).map((topic) => (
                     <Pill
                       key={topic.topic}
                       text={`${topic.topic} • ${Math.round(topic.accuracy * 100)}%`}
@@ -878,13 +1154,13 @@ export default function ReviewPage() {
                 </div>
               </div>
             )}
-            {reviewAnalysis.failedTopics.length > 1 && (
+            {analysis.failedTopics.length > 1 && (
               <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
                 <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
                   Other weak topics from this session
                 </div>
                 <div className="mt-3 grid gap-2">
-                  {reviewAnalysis.failedTopics.slice(1, 4).map((topic) => (
+                  {analysis.failedTopics.slice(1, 4).map((topic) => (
                     <div key={topic.topic} className="text-sm text-gray-700">
                       <span className="font-semibold">{topic.topic}</span> — {Math.round(topic.accuracy * 100)}% ({topic.correct}/{topic.total})
                     </div>
@@ -950,7 +1226,7 @@ export default function ReviewPage() {
                 <SecondaryButton href="/history">Open history</SecondaryButton>
               )}
               <PrimaryButton onClick={loadDuePreview}>Check due again</PrimaryButton>
-              <SecondaryButton href="/review">Run another recovery block</SecondaryButton>
+              <SecondaryButton onClick={startSession}>Replay this recovery block</SecondaryButton>
               <SecondaryButton href="/today">Back to Today</SecondaryButton>
               <SecondaryButton href="/coach">Open coach</SecondaryButton>
             </div>

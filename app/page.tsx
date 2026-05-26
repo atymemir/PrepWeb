@@ -22,22 +22,38 @@ function WordmarkHero() {
 }
 
 function LoopCard({
+  step,
   title,
   note,
-  href,
 }: {
+  step: string;
   title: string;
   note: string;
-  href: string;
 }) {
   return (
-    <Link
-      href={href}
-      className="rounded-2xl border border-gray-200 bg-white p-5 transition hover:-translate-y-0.5 hover:border-[#bdd7ff] hover:shadow-md"
-    >
-      <div className="text-base font-semibold text-[#0f172a]">{title}</div>
+    <div className="rounded-2xl border border-gray-200 bg-white p-5">
+      <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">{step}</div>
+      <div className="mt-2 text-base font-semibold text-[#0f172a]">{title}</div>
       <div className="mt-2 text-sm leading-relaxed text-gray-600">{note}</div>
-    </Link>
+    </div>
+  );
+}
+
+function TierCard({
+  title,
+  price,
+  note,
+}: {
+  title: string;
+  price: string;
+  note: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-gray-200 bg-white p-4">
+      <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">{title}</div>
+      <div className="mt-1 text-xl font-semibold tracking-tight text-[#0f172a]">{price}</div>
+      <div className="mt-2 text-sm leading-relaxed text-gray-600">{note}</div>
+    </div>
   );
 }
 
@@ -48,7 +64,7 @@ export default function HomePage() {
         <div className="grid gap-8 p-6 sm:p-8 lg:grid-cols-[1.2fr_0.8fr]">
           <div>
             <div className="inline-flex items-center rounded-full border border-[#486399] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
-              Digital SAT training system
+              SAT Study Operating System
             </div>
 
             <div className="mt-5">
@@ -56,27 +72,26 @@ export default function HomePage() {
             </div>
 
             <h1 className="mt-5 max-w-4xl text-3xl font-semibold tracking-tight text-white sm:text-4xl lg:text-5xl">
-              Serious SAT execution, not dashboard theater.
+              Serious SAT execution, with clear next actions.
             </h1>
 
             <p className="mt-4 max-w-2xl text-sm leading-relaxed text-[#d2dbec] sm:text-base">
-              One next action at a time: practice for signal, review for recovery, skills for diagnosis,
-              lessons for repair, and coach for route control.
+              Practice creates signal. Review clears debt. Skills and lessons route repair. Coach and history keep the loop honest.
             </p>
 
             <div className="mt-6 flex flex-col gap-3 sm:flex-row">
               <Link
-                href="/today"
+                href="/login?mode=signup"
                 className="inline-flex items-center justify-center rounded-xl bg-white px-5 py-3 text-sm font-semibold text-[#0f1b33] transition hover:bg-[#edf5ff]"
               >
-                Open command center
+                Start free
               </Link>
 
               <Link
-                href="/demo"
+                href="/today"
                 className="inline-flex items-center justify-center rounded-xl border border-[#5a719f] bg-white/5 px-5 py-3 text-sm font-semibold text-[#d8e4fb] transition hover:border-[#7d9acf] hover:bg-white/10"
               >
-                Try the demo
+                Open app
               </Link>
             </div>
           </div>
@@ -84,45 +99,44 @@ export default function HomePage() {
           <div className="grid gap-3">
             <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Core loop</div>
-              <div className="mt-2 text-lg font-semibold text-white">Practice → Review → Skills → Lessons → Coach</div>
+              <div className="mt-2 text-lg font-semibold text-white">Today → Practice → Review → Skills → Coach</div>
             </div>
             <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Session design</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Execution depth</div>
               <div className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
-                Short, repeatable blocks with durable engagement tracking and recovery pressure.
+                Session history, replay/revise routes, and exam shell realism where testing authenticity matters.
               </div>
             </div>
             <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">SAT tools layer</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Tiered shell</div>
               <div className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
-                Math tools are available as an in-session layer, with future-ready Desmos integration.
+                Free is real. Pro and Ultimate unlock deeper execution, analysis, and strategist throughput.
               </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <LoopCard title="Today" note="Start exactly where your mission is." href="/today" />
-        <LoopCard title="Practice" note="Generate fresh signal under pressure." href="/practice?subject=Reading" />
-        <LoopCard title="Review" note="Clear active debt before more volume." href="/review" />
-        <LoopCard title="History" note="Reopen outcomes and launch targeted retries." href="/history" />
-        <LoopCard title="Coach" note="Get strategist routing from real data." href="/coach" />
+      <section className="mt-5 rounded-3xl border border-gray-200 bg-white p-6 sm:p-8">
+        <h2 className="text-2xl font-semibold tracking-tight text-[#0f172a]">First session path</h2>
+        <div className="mt-4 grid gap-4 md:grid-cols-3">
+          <LoopCard step="Step 1" title="Run one practice block" note="Start with 12 questions to generate real signal." />
+          <LoopCard step="Step 2" title="Clear review debt" note="Recover misses before stacking new volume." />
+          <LoopCard step="Step 3" title="Route targeted repair" note="Use skills/history to focus one weak subtopic next." />
+        </div>
       </section>
 
       <section className="mt-5 rounded-3xl border border-gray-200 bg-white p-6 sm:p-8">
-        <div className="grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
-          <div>
-            <h2 className="text-2xl font-semibold tracking-tight text-[#0f172a]">Built for durable momentum</h2>
-            <p className="mt-3 text-sm leading-relaxed text-gray-600">
-              The goal is not to feel busy. The goal is to make each session materially improve decision quality for
-              the next one.
-            </p>
-          </div>
-          <div className="rounded-2xl border border-[#c8ddff] bg-[#f3f8ff] p-4 text-sm leading-relaxed text-gray-700">
-            No fake exact score promises. No noisy gamification. No broad advice loops. Just evidence, recovery, and
-            precise next actions.
-          </div>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <h2 className="text-2xl font-semibold tracking-tight text-[#0f172a]">Plans</h2>
+          <Link href="/pricing" className="text-sm font-semibold text-[#004aad] underline hover:text-[#003b88]">
+            Full plan details
+          </Link>
+        </div>
+        <div className="mt-4 grid gap-4 md:grid-cols-3">
+          <TierCard title="Free" price="$0" note="Core loop + SAT tools + recent history window." />
+          <TierCard title="Pro" price="$24/mo" note="Exam shell + deeper replay/revise + AI strategist access." />
+          <TierCard title="Ultimate" price="$49/mo" note="Higher AI throughput + deeper long-window trend access." />
         </div>
       </section>
     </main>
