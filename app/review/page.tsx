@@ -8,8 +8,23 @@ import { analyzeReviewSession } from "../lib/sessionAnalysis";
 import { requestQuestionExplanation, type AiExplanation } from "../lib/questionExplanation";
 import { errorMessage } from "../lib/errors";
 import { recordAnswerEvent } from "../lib/answerEvents";
+import {
+  applyMomentumAnswer,
+  createMomentum,
+  createShareText,
+  pointsToNextDivision,
+  type EngagementIdentity,
+  type EngagementStatus,
+  type SessionMomentum,
+  type SessionPayoff,
+} from "../lib/engagement";
+import {
+  getDurableEngagementSnapshot,
+  recordDurableEngagementSession,
+} from "../lib/engagementDurable";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 import QuestionActionBlock from "../components/QuestionActionBlock";
+import { IdentityStatusCard, MomentumRail, SessionPayoffCard } from "../components/EngagementSystem";
 
 type Question = {
   id: string;
@@ -45,6 +60,13 @@ function queueLabel(n: number) {
 
 function topicKey(topic: string | null) {
   return topic?.trim() || "Unknown";
+}
+
+function createClientSessionId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `sess-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function reviewReasonFor(args: {
@@ -93,6 +115,14 @@ export default function ReviewPage() {
     >
   >({});
   const [saving, setSaving] = useState(false);
+  const [identity, setIdentity] = useState<EngagementIdentity | null>(null);
+  const [identityStatus, setIdentityStatus] = useState<EngagementStatus | null>(null);
+  const [momentum, setMomentum] = useState<SessionMomentum>(() => createMomentum(limit));
+  const [sessionPayoff, setSessionPayoff] = useState<SessionPayoff | null>(null);
+  const [shareText, setShareText] = useState("");
+  const [copiedShare, setCopiedShare] = useState(false);
+  const [sessionClientId, setSessionClientId] = useState<string>(() => createClientSessionId());
+  const [engagementNotice, setEngagementNotice] = useState<string | null>(null);
 
   const lastSubmitRef = useRef<{
     questionId: string;
@@ -202,7 +232,19 @@ export default function ReviewPage() {
     lastSubmitRef.current = null;
 
     try {
-      await ensureAuth();
+      const uid = await ensureAuth();
+      if (uid) {
+        try {
+          const snapshot = await getDurableEngagementSnapshot();
+          setIdentity(snapshot.identity);
+          setIdentityStatus(snapshot.status);
+          setEngagementNotice(null);
+        } catch (engagementErr: unknown) {
+          setIdentity(null);
+          setIdentityStatus(null);
+          setEngagementNotice(errorMessage(engagementErr, "Durable engagement backend is unavailable."));
+        }
+      }
 
       const supabase = getSupabase();
       const { data, error } = await supabase.rpc("get_due_review_questions", { p_limit: limit });
@@ -210,6 +252,11 @@ export default function ReviewPage() {
 
       const list = (data ?? []) as Question[];
       setQuestions(list);
+      setMomentum(createMomentum(list.length || limit));
+      setSessionPayoff(null);
+      setShareText("");
+      setCopiedShare(false);
+      setSessionClientId(createClientSessionId());
     } catch (e: unknown) {
       setErr(errorMessage(e, "Failed to load review queue."));
     } finally {
@@ -221,6 +268,11 @@ export default function ReviewPage() {
     if (!questions.length) return;
     setMode("in_session");
     setIdx(0);
+    setMomentum(createMomentum(questions.length || limit));
+    setSessionPayoff(null);
+    setShareText("");
+    setCopiedShare(false);
+    setSessionClientId(createClientSessionId());
     resetQuestionUI();
     setAnswers({});
     lastSubmitRef.current = null;
@@ -284,6 +336,13 @@ export default function ReviewPage() {
         correct: recorded.isCorrect,
         correctOption: recorded.correctOption || String(q.correct_option).toUpperCase(),
       });
+
+      setMomentum((prev) =>
+        applyMomentumAnswer(prev, {
+          correct: recorded.isCorrect,
+          difficultyLevel: q.difficulty_level,
+        })
+      );
       setLocked(true);
     } catch (e: unknown) {
       setErr(errorMessage(e, "Failed to record review answer."));
@@ -320,6 +379,12 @@ export default function ReviewPage() {
       }));
 
       setFeedback({ correct: recorded.isCorrect, correctOption: correctOpt });
+      setMomentum((prev) =>
+        applyMomentumAnswer(prev, {
+          correct: recorded.isCorrect,
+          difficultyLevel: q?.difficulty_level,
+        })
+      );
       setLocked(true);
     } catch (e: unknown) {
       setErr(errorMessage(e, "Retry failed."));
@@ -365,18 +430,70 @@ export default function ReviewPage() {
     }
   }
 
-  function nextOrFinish() {
+  async function finishReviewSession() {
+    const answered = Object.keys(answers).length;
+    const correct = Object.values(answers).filter((answer) => answer.correct).length;
+
+    try {
+      const applied = await recordDurableEngagementSession({
+        clientSessionId: sessionClientId,
+        mode: "review",
+        answered,
+        correct,
+        total,
+      });
+
+      setIdentity(applied.identity);
+      setIdentityStatus(applied.status);
+      setSessionPayoff(applied.payoff);
+      setEngagementNotice(null);
+
+      setShareText(
+        createShareText({
+          nickname: "Student",
+          mode: "review",
+          correct,
+          answered,
+          accuracyPct: applied.payoff.accuracyPct,
+          streakDays: applied.identity.streakDays,
+          level: applied.status.level,
+          division: applied.status.division.label,
+        })
+      );
+    } catch (e: unknown) {
+      setSessionPayoff(null);
+      setEngagementNotice(
+        errorMessage(e, "Session results were saved, but durable engagement sync failed.")
+      );
+    }
+
+    setMode("done");
+  }
+
+  async function nextOrFinish() {
     if (!q) return;
 
     const isLast = idx >= questions.length - 1;
     if (isLast) {
-      setMode("done");
+      await finishReviewSession();
       return;
     }
 
     setIdx((i) => i + 1);
     resetQuestionUI();
     lastSubmitRef.current = null;
+  }
+
+  async function copyShareResult() {
+    if (!shareText) return;
+
+    try {
+      await navigator.clipboard.writeText(shareText);
+      setCopiedShare(true);
+      window.setTimeout(() => setCopiedShare(false), 1600);
+    } catch {
+      setCopiedShare(false);
+    }
   }
 
   return (
@@ -420,9 +537,25 @@ export default function ReviewPage() {
 
       {!loading && !err && mode === "ready" && (
         <div className="grid gap-6">
+          {identity && identityStatus && (
+            <IdentityStatusCard
+              identity={identity}
+              status={identityStatus}
+              title="Recovery identity"
+              subtitle={`${identityStatus.division.label} • Level ${identityStatus.level}`}
+              note="Review sessions now carry full identity and streak weight, so recovery behavior is visibly rewarded."
+            />
+          )}
+
+          {engagementNotice && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+              {engagementNotice}
+            </div>
+          )}
+
           <Card
             title="Recovery queue"
-            subtitle="What is due now should be cleared before more forward work."
+            subtitle="Finish what is due now to preserve momentum and protect your streak quality."
             right={<Pill text={queueLabel(questions.length)} tone={queueTone} />}
             accent={questions.length > 0}
             prominence={questions.length > 0 ? "prominent" : "quiet"}
@@ -483,105 +616,117 @@ export default function ReviewPage() {
       )}
 
       {!loading && !err && mode === "in_session" && q && (
-        <Card
-          title={`Recovery item ${idx + 1} / ${Math.max(total, 1)}`}
-          subtitle={`Why this is here: ${currentReviewReason ?? "new mistake"} • Accuracy so far: ${accuracyPct}%`}
-          right={<Pill text={currentReviewReason ?? "Review mode"} tone="accent" />}
-          accent
-        >
-          <div className="text-base font-medium leading-relaxed whitespace-pre-line text-black">
-            {q.question_text}
-          </div>
+        <div className="grid gap-4">
+          <MomentumRail
+            momentum={momentum}
+            title="Recovery momentum"
+            subtitle="Clear the queue with steady accuracy to keep identity momentum intact."
+          />
 
-          <div className="mt-6 space-y-3">
-            {(["A", "B", "C", "D"] as const).map((letter) => {
-              const chosen = selected === letter;
-              const correct = locked && q.correct_option.toUpperCase() === letter;
-              const wrongChosen = locked && chosen && !correct;
+          <Card
+            title={`Recovery item ${idx + 1} / ${Math.max(total, 1)}`}
+            subtitle={`Why this is here: ${currentReviewReason ?? "new mistake"} • Accuracy so far: ${accuracyPct}%`}
+            right={<Pill text={currentReviewReason ?? "Review mode"} tone="accent" />}
+            accent
+          >
+            <div className="text-base font-medium leading-relaxed whitespace-pre-line text-black">
+              {q.question_text}
+            </div>
 
-              let cls = "border border-gray-200 bg-white";
-              if (chosen) cls = "border-[#004aad] bg-[#eef4ff]";
-              if (correct) cls = "border-green-600 bg-green-50";
-              if (wrongChosen) cls = "border-red-600 bg-red-50";
+            <div className="mt-6 space-y-3">
+              {(["A", "B", "C", "D"] as const).map((letter) => {
+                const chosen = selected === letter;
+                const correct = locked && q.correct_option.toUpperCase() === letter;
+                const wrongChosen = locked && chosen && !correct;
 
-              return (
+                let cls = "border border-gray-200 bg-white";
+                if (chosen) cls = "border-[#004aad] bg-[#eef4ff]";
+                if (correct) cls = "border-green-600 bg-green-50";
+                if (wrongChosen) cls = "border-red-600 bg-red-50";
+
+                return (
+                  <button
+                    key={letter}
+                    onClick={() => pick(letter)}
+                    className={`w-full rounded-xl p-4 text-left ${cls}`}
+                    disabled={saving}
+                  >
+                    <div className="mb-1 text-xs font-semibold text-gray-500">{letter}</div>
+                    <div className="text-sm text-gray-900">{optionText(letter)}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {err && (
+              <div className="mt-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                {err}
+                <div className="mt-3 grid gap-2">
+                  <PrimaryButton onClick={retryRecord} disabled={saving}>
+                    {saving ? "Retrying…" : "Retry record"}
+                  </PrimaryButton>
+                </div>
+              </div>
+            )}
+
+            <div className="mt-6 flex gap-3 items-start">
+              {!locked ? (
                 <button
-                  key={letter}
-                  onClick={() => pick(letter)}
-                  className={`w-full rounded-xl p-4 text-left ${cls}`}
+                  className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
+                  onClick={submit}
+                  disabled={!selected || saving}
+                >
+                  {saving ? "Saving…" : "Submit"}
+                </button>
+              ) : (
+                <button
+                  className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
+                  onClick={nextOrFinish}
                   disabled={saving}
                 >
-                  <div className="mb-1 text-xs font-semibold text-gray-500">{letter}</div>
-                  <div className="text-sm text-gray-900">{optionText(letter)}</div>
+                  {idx === total - 1 ? "Finish" : "Next"}
                 </button>
-              );
-            })}
-          </div>
+              )}
 
-          {err && (
-            <div className="mt-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-              {err}
-              <div className="mt-3 grid gap-2">
-                <PrimaryButton onClick={retryRecord} disabled={saving}>
-                  {saving ? "Retrying…" : "Retry record"}
-                </PrimaryButton>
-              </div>
-            </div>
-          )}
+              {locked && feedback && (
+                <div className="flex-1 rounded-xl border border-gray-200 p-4">
+                  <div className={`font-semibold ${feedback.correct ? "text-green-700" : "text-red-700"}`}>
+                    {feedback.correct ? "Recovered" : "Still unstable"}
+                  </div>
 
-          <div className="mt-6 flex gap-3 items-start">
-            {!locked ? (
-              <button
-                className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
-                onClick={submit}
-                disabled={!selected || saving}
-              >
-                {saving ? "Saving…" : "Submit"}
-              </button>
-            ) : (
-              <button
-                className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
-                onClick={nextOrFinish}
-                disabled={saving}
-              >
-                {idx === total - 1 ? "Finish" : "Next"}
-              </button>
-            )}
+                  <div className="mt-1 text-xs text-gray-600">
+                    Reward: +{momentum.instantXp} XP • Combo {momentum.combo}
+                  </div>
 
-            {locked && feedback && (
-              <div className="flex-1 rounded-xl border border-gray-200 p-4">
-                <div className={`font-semibold ${feedback.correct ? "text-green-700" : "text-red-700"}`}>
-                  {feedback.correct ? "Recovered" : "Still unstable"}
+                  {!feedback.correct && (
+                    <div className="mt-1 text-sm text-gray-700">
+                      Correct answer: <span className="font-semibold">{feedback.correctOption}</span>
+                    </div>
+                  )}
+
+                  {q.explanation ? (
+                    <div className="mt-3 text-sm text-gray-700 whitespace-pre-line">
+                      <span className="font-semibold">Explanation:</span> {q.explanation}
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-sm text-gray-600">No explanation available yet.</div>
+                  )}
+                  <QuestionActionBlock
+                    mode="review"
+                    questionId={q.id}
+                    subject={q.subject}
+                    subskill={q.topic || undefined}
+                    onExplain={generateAiExplanation}
+                    aiExplainLoading={aiExplainLoading}
+                    aiExplainError={aiExplainError}
+                    aiExplain={aiExplain}
+                    contextLine={`Review reason: ${currentReviewReason ?? "new mistake"}`}
+                  />
                 </div>
-
-                {!feedback.correct && (
-                  <div className="mt-1 text-sm text-gray-700">
-                    Correct answer: <span className="font-semibold">{feedback.correctOption}</span>
-                  </div>
-                )}
-
-                {q.explanation ? (
-                  <div className="mt-3 text-sm text-gray-700 whitespace-pre-line">
-                    <span className="font-semibold">Explanation:</span> {q.explanation}
-                  </div>
-                ) : (
-                  <div className="mt-3 text-sm text-gray-600">No explanation available yet.</div>
-                )}
-                <QuestionActionBlock
-                  mode="review"
-                  questionId={q.id}
-                  subject={q.subject}
-                  subskill={q.topic || undefined}
-                  onExplain={generateAiExplanation}
-                  aiExplainLoading={aiExplainLoading}
-                  aiExplainError={aiExplainError}
-                  aiExplain={aiExplain}
-                  contextLine={`Review reason: ${currentReviewReason ?? "new mistake"}`}
-                />
-              </div>
-            )}
-          </div>
-        </Card>
+              )}
+            </div>
+          </Card>
+        </div>
       )}
 
       {!loading && !err && mode === "done" && (
@@ -688,6 +833,57 @@ export default function ReviewPage() {
                 </div>
               </div>
             )}
+
+            {sessionPayoff && identityStatus && identity && (
+              <SessionPayoffCard
+                payoff={sessionPayoff}
+                status={identityStatus}
+                streakDays={identity.streakDays}
+                mode="review"
+              />
+            )}
+
+            {identityStatus && identity && (
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                  Retention status
+                </div>
+                <div className="mt-2 text-sm text-gray-700">
+                  Division: <span className="font-semibold text-black">{identityStatus.division.label}</span>
+                  <span className="mx-2 text-gray-300">•</span>
+                  Level {identityStatus.level}
+                  <span className="mx-2 text-gray-300">•</span>
+                  Streak {identity.streakDays}d
+                </div>
+                {identityStatus.nextDivision && (
+                  <div className="mt-2 text-sm text-gray-700">
+                    {pointsToNextDivision(identity)} XP to {identityStatus.nextDivision.label}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {shareText && (
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                  Shareable result
+                </div>
+                <div className="mt-2 text-sm leading-relaxed text-gray-700">{shareText}</div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:max-w-xl">
+                  <PrimaryButton onClick={copyShareResult}>
+                    {copiedShare ? "Copied" : "Copy result"}
+                  </PrimaryButton>
+                  <SecondaryButton href="/leagues">Post in community</SecondaryButton>
+                </div>
+              </div>
+            )}
+
+            {engagementNotice && (
+              <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+                {engagementNotice}
+              </div>
+            )}
+
             <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <PrimaryButton onClick={loadDuePreview}>Check due again</PrimaryButton>
               <SecondaryButton href={repairPracticeHref}>Targeted practice</SecondaryButton>

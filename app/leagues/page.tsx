@@ -4,7 +4,16 @@ export const dynamic = 'force-dynamic';
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
+import { errorMessage } from "../lib/errors";
+import {
+  createShareText,
+  pointsToNextDivision,
+  type EngagementIdentity,
+  type EngagementStatus,
+} from "../lib/engagement";
+import { getDurableEngagementSnapshot } from "../lib/engagementDurable";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import { IdentityStatusCard } from "../components/EngagementSystem";
 
 type Entry = {
   user_id: string;
@@ -46,9 +55,14 @@ export default function LeaguesPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [challengeCopied, setChallengeCopied] = useState(false);
+  const [resultCopied, setResultCopied] = useState(false);
 
   const [userId, setUserId] = useState<string>("");
   const [rows, setRows] = useState<Entry[]>([]);
+  const [identity, setIdentity] = useState<EngagementIdentity | null>(null);
+  const [identityStatus, setIdentityStatus] = useState<EngagementStatus | null>(null);
+  const [engagementNotice, setEngagementNotice] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -67,12 +81,23 @@ export default function LeaguesPage() {
       const uid = sessionData.session.user.id;
       setUserId(uid);
 
+      try {
+        const snapshot = await getDurableEngagementSnapshot();
+        setIdentity(snapshot.identity);
+        setIdentityStatus(snapshot.status);
+        setEngagementNotice(null);
+      } catch (engagementErr: unknown) {
+        setIdentity(null);
+        setIdentityStatus(null);
+        setEngagementNotice(errorMessage(engagementErr, "Durable engagement backend is unavailable."));
+      }
+
       const { data: res, error } = await supabase.rpc("get_weekly_leaderboard");
       if (error) throw new Error(error.message);
 
       setRows((res ?? []) as Entry[]);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load community.");
+    } catch (e: unknown) {
+      setErr(errorMessage(e, "Failed to load community."));
       setRows([]);
     } finally {
       setLoading(false);
@@ -80,7 +105,18 @@ export default function LeaguesPage() {
   }
 
   useEffect(() => {
-    load();
+    let cancelled = false;
+
+    const run = async () => {
+      await Promise.resolve();
+      if (!cancelled) await load();
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -111,6 +147,46 @@ export default function LeaguesPage() {
   );
   const inviteCode = useMemo(() => (userId ? `ALGA-${userId.slice(0, 8).toUpperCase()}` : "ALGA"), [userId]);
 
+  const pointsToClimb = useMemo(() => {
+    if (!myRow || !myRank || myRank <= 1) return 0;
+    const above = rows[myRank - 2];
+    if (!above) return 0;
+    return Math.max(1, Math.round(above.points - myRow.points + 1));
+  }, [myRank, myRow, rows]);
+
+  const pointsToTop10 = useMemo(() => {
+    if (!myRow || !myRank || myRank <= 10 || rows.length < 10) return 0;
+    const target = rows[9];
+    if (!target) return 0;
+    return Math.max(1, Math.round(target.points - myRow.points + 1));
+  }, [myRank, myRow, rows]);
+
+  const challengeText = useMemo(() => {
+    const baseTarget = Math.max((myRow?.answered ?? 0) + 12, 24);
+    const reviewTarget = Math.max((myRow?.review_answered ?? 0) + 4, 6);
+    const accTarget = Math.max(70, Math.round((myRow?.accuracy ?? 0.6) * 100));
+    return [
+      "SAT crew challenge:",
+      `Before week close, hit ${baseTarget} practice answers + ${reviewTarget} review answers at ${accTarget}%+ accuracy.`,
+      "Loser posts next session result in Community.",
+    ].join(" ");
+  }, [myRow]);
+
+  const resultText = useMemo(() => {
+    if (!identity?.lastSession || !identityStatus) return "";
+
+    return createShareText({
+      nickname: myRow?.nickname || "Student",
+      mode: identity.lastSession.mode,
+      correct: identity.lastSession.correct,
+      answered: identity.lastSession.answered,
+      accuracyPct: identity.lastSession.accuracyPct,
+      streakDays: identity.streakDays,
+      level: identityStatus.level,
+      division: identityStatus.division.label,
+    });
+  }, [identity, identityStatus, myRow]);
+
   async function copyInvite() {
     const link =
       typeof window === "undefined"
@@ -123,6 +199,27 @@ export default function LeaguesPage() {
       window.setTimeout(() => setCopied(false), 1600);
     } catch {
       setCopied(false);
+    }
+  }
+
+  async function copyChallenge() {
+    try {
+      await navigator.clipboard.writeText(challengeText);
+      setChallengeCopied(true);
+      window.setTimeout(() => setChallengeCopied(false), 1600);
+    } catch {
+      setChallengeCopied(false);
+    }
+  }
+
+  async function copyResult() {
+    if (!resultText) return;
+    try {
+      await navigator.clipboard.writeText(resultText);
+      setResultCopied(true);
+      window.setTimeout(() => setResultCopied(false), 1600);
+    } catch {
+      setResultCopied(false);
     }
   }
 
@@ -164,6 +261,97 @@ export default function LeaguesPage() {
 
       {!loading && !err && rows.length > 0 && (
         <div className="grid gap-4">
+          {identity && identityStatus && (
+            <IdentityStatusCard
+              identity={identity}
+              status={identityStatus}
+              title="Competitive identity"
+              subtitle={`${identityStatus.division.label} • Level ${identityStatus.level}`}
+              note="Community now ties directly to streak, division pressure, and visible SAT-work output."
+            />
+          )}
+
+          {engagementNotice && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+              {engagementNotice}
+            </div>
+          )}
+
+          <Card
+            title="League pressure"
+            subtitle="Concrete pressure beats passive ranking: know the exact score gap to chase."
+            right={<Pill text={myRank ? `Rank #${myRank}` : "Unranked"} tone="accent" />}
+            accent
+          >
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <StatBox
+                label="Points to next rank"
+                value={pointsToClimb > 0 ? String(pointsToClimb) : "—"}
+                hint={pointsToClimb > 0 ? "Climb one place" : "You are already leading"}
+                accent={pointsToClimb > 0}
+              />
+              <StatBox
+                label="Points to Top 10"
+                value={pointsToTop10 > 0 ? String(pointsToTop10) : "—"}
+                hint={pointsToTop10 > 0 ? "Current weekly cutoff" : "Already Top 10"}
+              />
+              <StatBox
+                label="Daily streak"
+                value={identity ? `${identity.streakDays}d` : "—"}
+                hint={identity ? `Best ${identity.bestStreakDays}d` : "No streak yet"}
+                accent={(identity?.streakDays ?? 0) >= 3}
+              />
+              <StatBox
+                label="Division gap"
+                value={identity ? String(pointsToNextDivision(identity)) : "—"}
+                hint={
+                  identityStatus?.nextDivision
+                    ? `XP to ${identityStatus.nextDivision.label}`
+                    : "Top division"
+                }
+              />
+            </div>
+
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <PrimaryButton href="/practice?subject=Reading">Push practice points</PrimaryButton>
+              <SecondaryButton href="/review">Push review points</SecondaryButton>
+            </div>
+          </Card>
+
+          <Card
+            title="Friend challenge loop"
+            subtitle="Use direct challenge language to trigger return sessions from real classmates."
+            right={<Pill text="Challenge ready" tone="accent" />}
+          >
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm leading-relaxed text-gray-700">
+              {challengeText}
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:max-w-xl">
+              <PrimaryButton onClick={copyChallenge}>
+                {challengeCopied ? "Challenge copied" : "Copy challenge"}
+              </PrimaryButton>
+              <SecondaryButton onClick={copyInvite}>
+                {copied ? "Invite copied" : "Copy invite link"}
+              </SecondaryButton>
+            </div>
+
+            {resultText && (
+              <div className="mt-5 rounded-xl border border-gray-200 bg-white p-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                  Latest session result
+                </div>
+                <div className="mt-2 text-sm leading-relaxed text-gray-700">{resultText}</div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:max-w-xl">
+                  <PrimaryButton onClick={copyResult}>
+                    {resultCopied ? "Result copied" : "Copy result message"}
+                  </PrimaryButton>
+                  <SecondaryButton href="/today">Return to Today</SecondaryButton>
+                </div>
+              </div>
+            )}
+          </Card>
+
           <Card
             title="Your crew streak"
             subtitle="Shared streaks should create accountability, not empty competition."

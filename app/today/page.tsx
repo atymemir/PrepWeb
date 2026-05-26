@@ -5,15 +5,20 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
+import { errorMessage } from "../lib/errors";
 import {
   confidenceLabel,
   pickWeakestAcrossSubjects,
-  pct,
-  stableRows,
-  lowSignalRows,
   type SkillRow,
 } from "../lib/learningSignals";
+import {
+  pointsToNextDivision,
+  type EngagementIdentity,
+  type EngagementStatus,
+} from "../lib/engagement";
+import { getDurableEngagementSnapshot } from "../lib/engagementDurable";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import { IdentityStatusCard } from "../components/EngagementSystem";
 
 type Profile = {
   id: string;
@@ -61,6 +66,9 @@ export default function TodayPage() {
   const [skillsReading, setSkillsReading] = useState<SkillRow[]>([]);
   const [skillsMath, setSkillsMath] = useState<SkillRow[]>([]);
   const [dueReviewCount, setDueReviewCount] = useState<number>(0);
+  const [identity, setIdentity] = useState<EngagementIdentity | null>(null);
+  const [identityStatus, setIdentityStatus] = useState<EngagementStatus | null>(null);
+  const [engagementNotice, setEngagementNotice] = useState<string | null>(null);
 
   const nickname = useMemo(() => profile?.nickname?.trim() || "Student", [profile]);
   const dleft = useMemo(() => daysUntil(profile?.exam_date ?? null), [profile]);
@@ -89,14 +97,6 @@ export default function TodayPage() {
     return pickWeakestAcrossSubjects(skillsReading, skillsMath);
   }, [skillsReading, skillsMath]);
 
-  const stableCount = useMemo(() => {
-    return stableRows([...skillsReading, ...skillsMath]).length;
-  }, [skillsReading, skillsMath]);
-
-  const lowSignalCount = useMemo(() => {
-    return lowSignalRows([...skillsReading, ...skillsMath]).length;
-  }, [skillsReading, skillsMath]);
-
   const weakestHref = useMemo(() => {
     if (!weakestOverall?.row?.subskill) return "/practice?subject=Reading";
     return `/practice?subject=${weakestOverall.subject}&subskill=${encodeURIComponent(
@@ -108,6 +108,38 @@ export default function TodayPage() {
     if (!weakestOverall?.row?.subskill) return "/lessons";
     return `/lesson/${encodeURIComponent(weakestOverall.row.subskill)}`;
   }, [weakestOverall]);
+
+  const completionRate = useMemo(() => {
+    if (!identity || identity.totalSessions === 0) return null;
+    return Math.round((identity.completedSessions / identity.totalSessions) * 100);
+  }, [identity]);
+
+  const dailyMission = useMemo(() => {
+    if (dueReviewCount > 0) {
+      return {
+        title: "Protect streak quality",
+        note: "Clear due review first so daily consistency reflects real recovery, not only new attempts.",
+        actionLabel: "Start review now",
+        actionHref: "/review",
+      };
+    }
+
+    if (weakestOverall?.row) {
+      return {
+        title: `Push ${weakestOverall.row.subskill}`,
+        note: "Run a focused block on your weakest current signal, then let review schedule the misses.",
+        actionLabel: "Target weak zone",
+        actionHref: weakestHref,
+      };
+    }
+
+    return {
+      title: "Start a clean block",
+      note: "Generate one fresh session today to keep identity momentum active.",
+      actionLabel: "Open practice",
+      actionHref: "/practice?subject=Reading",
+    };
+  }, [dueReviewCount, weakestOverall, weakestHref]);
 
   const priority = useMemo(() => {
     if (dueReviewCount > 0) {
@@ -178,6 +210,17 @@ export default function TodayPage() {
       if (p.error) throw new Error(p.error.message);
       setProfile(p.data as Profile);
 
+      try {
+        const snapshot = await getDurableEngagementSnapshot();
+        setIdentity(snapshot.identity);
+        setIdentityStatus(snapshot.status);
+        setEngagementNotice(null);
+      } catch (engagementErr: unknown) {
+        setIdentity(null);
+        setIdentityStatus(null);
+        setEngagementNotice(errorMessage(engagementErr, "Durable engagement backend is unavailable."));
+      }
+
       const lb = await supabase.rpc("get_weekly_leaderboard");
       if (lb.error) throw new Error(lb.error.message);
       setLeaderboard((lb.data ?? []) as LeaderEntry[]);
@@ -193,8 +236,8 @@ export default function TodayPage() {
       const due = await supabase.rpc("get_due_review_questions", { p_limit: 50 });
       if (due.error) throw new Error(due.error.message);
       setDueReviewCount(((due.data ?? []) as Question[]).length);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load Today.");
+    } catch (e: unknown) {
+      setErr(errorMessage(e, "Failed to load Today."));
     } finally {
       setLoading(false);
     }
@@ -209,7 +252,18 @@ export default function TodayPage() {
   }
 
   useEffect(() => {
-    load();
+    let cancelled = false;
+
+    const run = async () => {
+      await Promise.resolve();
+      if (!cancelled) await load();
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -255,6 +309,57 @@ export default function TodayPage() {
           : "Use today to generate signal, repair one weak zone, then let review catch misses."
       }
     />
+
+    {identity && identityStatus && (
+      <IdentityStatusCard
+        identity={identity}
+        status={identityStatus}
+        title="Daily identity"
+        subtitle={`${identityStatus.division.label} • Level ${identityStatus.level} • ${identity.streakDays}d streak`}
+        note="This layer tracks completion discipline, accuracy, and consistency across every practice and review block."
+      />
+    )}
+
+    {engagementNotice && (
+      <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+        {engagementNotice}
+      </div>
+    )}
+
+    <Card
+      title="Daily mission"
+      subtitle="One clear return reason every day: protect streak quality, then move your weak zone."
+      right={<Pill text={dueReviewCount > 0 ? "Recovery pressure" : "Forward pressure"} tone="accent" />}
+      accent
+      prominence="prominent"
+    >
+      <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
+        <div className="label label-accent">Mission</div>
+        <div className="mt-2 text-2xl font-semibold tracking-tight text-black">{dailyMission.title}</div>
+        <div className="mt-3 text-sm leading-relaxed text-gray-700">{dailyMission.note}</div>
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:max-w-2xl">
+          <PrimaryButton href={dailyMission.actionHref}>{dailyMission.actionLabel}</PrimaryButton>
+          <SecondaryButton href="/leagues">Open community pressure</SecondaryButton>
+        </div>
+
+        {identity && identityStatus && (
+          <div className="mt-5 grid gap-3 sm:grid-cols-3">
+            <div className="rounded-xl border border-gray-200 bg-white px-3 py-3 text-sm text-gray-700">
+              Streak guard: <span className="font-semibold text-black">{identity.streakDays}d</span>
+            </div>
+            <div className="rounded-xl border border-gray-200 bg-white px-3 py-3 text-sm text-gray-700">
+              Completion rate: <span className="font-semibold text-black">{completionRate ?? 0}%</span>
+            </div>
+            <div className="rounded-xl border border-gray-200 bg-white px-3 py-3 text-sm text-gray-700">
+              {identityStatus.nextDivision
+                ? `${pointsToNextDivision(identity)} XP to ${identityStatus.nextDivision.label}`
+                : "Top division reached"}
+            </div>
+          </div>
+        )}
+      </div>
+    </Card>
 
     <Card
       title="Today’s priority"

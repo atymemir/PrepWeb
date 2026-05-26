@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
 import { getSupabase } from "@/app/lib/supabase";
+import { getDurableEngagementSnapshot } from "@/app/lib/engagementDurable";
 
 const navItems = [
   { href: "/today", label: "Today", match: "/today" },
@@ -44,16 +45,38 @@ export default function Header() {
   const pathname = usePathname();
   const [hasSession, setHasSession] = useState(false);
   const [ready, setReady] = useState(false);
+  const [statusLabel, setStatusLabel] = useState<string | null>(null);
+  const [streakLabel, setStreakLabel] = useState<string | null>(null);
 
   useEffect(() => {
     const supabase = getSupabase();
     let mounted = true;
+
+    async function syncStatus(userId: string | null) {
+      if (!userId) {
+        setStatusLabel(null);
+        setStreakLabel(null);
+        return;
+      }
+
+      try {
+        const snapshot = await getDurableEngagementSnapshot();
+        if (!mounted) return;
+        setStatusLabel(`${snapshot.status.division.label} L${snapshot.status.level}`);
+        setStreakLabel(`${snapshot.identity.streakDays}d streak`);
+      } catch {
+        if (!mounted) return;
+        setStatusLabel(null);
+        setStreakLabel(null);
+      }
+    }
 
     async function bootstrap() {
       try {
         const { data } = await supabase.auth.getSession();
         if (!mounted) return;
         setHasSession(!!data.session);
+        await syncStatus(data.session?.user.id ?? null);
       } finally {
         if (mounted) setReady(true);
       }
@@ -66,11 +89,21 @@ export default function Header() {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setHasSession(!!session);
       setReady(true);
+      void syncStatus(session?.user.id ?? null);
     });
+
+    function onEngagementUpdated(event: Event) {
+      const detail = (event as CustomEvent<{ userId?: string }>).detail;
+      if (!detail?.userId) return;
+      void syncStatus(detail.userId);
+    }
+
+    window.addEventListener("alga-engagement-updated", onEngagementUpdated);
 
     return () => {
       mounted = false;
       subscription.unsubscribe();
+      window.removeEventListener("alga-engagement-updated", onEngagementUpdated);
     };
   }, []);
 
@@ -82,6 +115,12 @@ export default function Header() {
     if (hasSession) {
       return (
         <div className="flex shrink-0 items-center gap-2">
+          {statusLabel && streakLabel && (
+            <div className="hidden rounded-lg border border-[#c7dbff] bg-[#eef4ff] px-3 py-2 text-xs font-semibold text-[#004aad] xl:block">
+              {statusLabel} • {streakLabel}
+            </div>
+          )}
+
           <Link
             href="/profile"
             className="hidden rounded-lg px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-50 hover:text-black sm:inline-flex"
@@ -109,7 +148,7 @@ export default function Header() {
         </Link>
       </div>
     );
-  }, [hasSession, ready]);
+  }, [hasSession, ready, statusLabel, streakLabel]);
 
   return (
     <header className="sticky top-0 z-40 border-b border-gray-200/80 bg-white/95 backdrop-blur">

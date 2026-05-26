@@ -4,7 +4,15 @@ export const dynamic = 'force-dynamic';
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
+import { errorMessage } from "../lib/errors";
+import {
+  pointsToNextDivision,
+  type EngagementIdentity,
+  type EngagementStatus,
+} from "../lib/engagement";
+import { getDurableEngagementSnapshot } from "../lib/engagementDurable";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import { IdentityStatusCard } from "../components/EngagementSystem";
 
 type Profile = {
   id: string;
@@ -59,6 +67,9 @@ export default function ProfilePage() {
   const [err, setErr] = useState<string | null>(null);
 
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [identity, setIdentity] = useState<EngagementIdentity | null>(null);
+  const [identityStatus, setIdentityStatus] = useState<EngagementStatus | null>(null);
+  const [engagementNotice, setEngagementNotice] = useState<string | null>(null);
 
   // editable fields
   const [nickname, setNickname] = useState("");
@@ -109,12 +120,23 @@ export default function ProfilePage() {
       const p = data as Profile;
       setProfile(p);
 
+      try {
+        const snapshot = await getDurableEngagementSnapshot();
+        setIdentity(snapshot.identity);
+        setIdentityStatus(snapshot.status);
+        setEngagementNotice(null);
+      } catch (engagementErr: unknown) {
+        setIdentity(null);
+        setIdentityStatus(null);
+        setEngagementNotice(errorMessage(engagementErr, "Durable engagement backend is unavailable."));
+      }
+
       setNickname(p.nickname ?? "");
       setTargetScore(String(p.target_score ?? 1400));
       setDailyHours(String(p.daily_study_hours ?? 2));
       setExamDate(isoToDateInput(p.exam_date));
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load profile.");
+    } catch (e: unknown) {
+      setErr(errorMessage(e, "Failed to load profile."));
     } finally {
       setLoading(false);
     }
@@ -145,8 +167,8 @@ export default function ProfilePage() {
 
       setMsg("Saved.");
       await loadProfile();
-    } catch (e: any) {
-      setErr(e?.message || "Save failed.");
+    } catch (e: unknown) {
+      setErr(errorMessage(e, "Save failed."));
     } finally {
       setSaving(false);
     }
@@ -161,7 +183,18 @@ export default function ProfilePage() {
   }
 
   useEffect(() => {
-    loadProfile();
+    let cancelled = false;
+
+    const run = async () => {
+      await Promise.resolve();
+      if (!cancelled) await loadProfile();
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -196,6 +229,29 @@ export default function ProfilePage() {
 
         {!loading && !err && (
           <div className="grid gap-4">
+            {identity && identityStatus && (
+              <IdentityStatusCard
+                identity={identity}
+                status={identityStatus}
+                title="Personal status"
+                subtitle={`${identityStatus.division.label} • Level ${identityStatus.level}`}
+                note="Your engagement identity updates when you complete practice or review blocks."
+              />
+            )}
+
+            {engagementNotice && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+                {engagementNotice}
+              </div>
+            )}
+
+            {identity && identityStatus?.nextDivision && (
+              <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
+                {pointsToNextDivision(identity)} XP to {identityStatus.nextDivision.label}.
+                Keep daily streak quality by clearing due review before stacking fresh practice.
+              </div>
+            )}
+
             {msg && (
               <div className="rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700">
                 {msg}
