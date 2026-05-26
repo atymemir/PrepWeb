@@ -11,7 +11,7 @@ import {
   weaknessScore,
   type SkillRow as SharedSkillRow,
 } from "../lib/learningSignals";
-import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import { ActionDock, Card, LoopRail, PageHeader, PagePurpose, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Row = SharedSkillRow;
 
@@ -124,6 +124,7 @@ export default function SkillsPage() {
   }, [rows, query]);
 
   const weakest3 = useMemo(() => sortWeakest(rows).slice(0, 3), [rows]);
+  const topWeak = weakest3[0] ?? null;
   const domainSummaries = useMemo(() => buildDomainSummaries(rows), [rows]);
   const groupedFiltered = useMemo(() => groupByDomain(filtered), [filtered]);
 
@@ -160,6 +161,17 @@ export default function SkillsPage() {
             </button>
           </div>
         }
+      />
+
+      <LoopRail active="Skills" next={topWeak ? "Lessons" : "Practice"} note="Use this page to choose one repair target, not five." />
+      <PagePurpose
+        purpose="Skills ranks what is weak."
+        instruction={
+          topWeak
+            ? `Fix one target first: ${topWeak.subskill}.`
+            : "Generate a little more practice signal so weak-zone ranking becomes reliable."
+        }
+        why="Diagnostics only matter when they immediately drive your next block."
       />
 
       {loading && (
@@ -394,6 +406,31 @@ export default function SkillsPage() {
             </div>
           </Card>
         </div>
+      )}
+
+      {!loading && !err && (
+        <ActionDock
+          title="Diagnostic next action"
+          note={
+            topWeak
+              ? `${topWeak.subskill}: ${pct(topWeak.accuracy)}% over ${topWeak.attempts} attempts.`
+              : "No stable weak row yet."
+          }
+          primary={{
+            label: topWeak ? "Practice top weak zone" : `Start ${subject} practice`,
+            href: topWeak
+              ? `/practice?subject=${subject}&subskill=${encodeURIComponent(topWeak.subskill)}`
+              : `/practice?subject=${subject}`,
+          }}
+          secondary={
+            topWeak
+              ? {
+                  label: "Open matching lesson",
+                  href: `/lesson/${encodeURIComponent(topWeak.subskill)}`,
+                }
+              : { label: "Back to Today", href: "/today" }
+          }
+        />
       )}
     </main>
   );

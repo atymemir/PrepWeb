@@ -1,10 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
-import { confidenceLabel } from "../lib/learningSignals";
 import { analyzeReviewSession } from "../lib/sessionAnalysis";
 import { requestQuestionExplanation, type AiExplanation } from "../lib/questionExplanation";
 import { errorMessage } from "../lib/errors";
@@ -23,9 +22,11 @@ import {
   getDurableEngagementSnapshot,
   recordDurableEngagementSession,
 } from "../lib/engagementDurable";
+import { recordStudySession } from "../lib/sessionHistory";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 import QuestionActionBlock from "../components/QuestionActionBlock";
-import { IdentityStatusCard, MomentumRail, SessionPayoffCard } from "../components/EngagementSystem";
+import { SessionPayoffCard } from "../components/EngagementSystem";
+import MathToolsLayer from "../components/MathToolsLayer";
 
 type Question = {
   id: string;
@@ -102,12 +103,18 @@ function formatClock(totalSeconds: number): string {
   return `${mm}:${ss}`;
 }
 
-function questionTimeLimitSeconds(subject: "Reading" | "Math"): number {
-  return subject === "Reading" ? 70 : 95;
+function questionTimeLimitSeconds(subject: "Reading" | "Math" | "Combined"): number {
+  if (subject === "Reading") return 70;
+  if (subject === "Math") return 95;
+  return 82;
 }
 
-function examTimeLimitSeconds(subject: "Reading" | "Math", questionCount: number): number {
-  return questionTimeLimitSeconds(subject) * Math.max(1, questionCount);
+function examTimeLimitSeconds(questions: Array<{ subject: string }>): number {
+  if (!questions.length) return 0;
+  return questions.reduce((total, question) => {
+    const qSubject = question.subject === "Math" ? "Math" : question.subject === "Reading" ? "Reading" : "Combined";
+    return total + questionTimeLimitSeconds(qSubject);
+  }, 0);
 }
 
 function autoOptionForQuestion(questionId: string): "A" | "B" | "C" | "D" {
@@ -162,7 +169,7 @@ export default function PracticeClient() {
   const router = useRouter();
   const sp = useSearchParams();
 
-  const subject = (sp.get("subject") || "Reading") as "Reading" | "Math";
+  const subject = (sp.get("subject") || "Reading") as "Reading" | "Math" | "Combined";
   const subskill = sp.get("subskill") || "";
   const limit = 12;
 
@@ -196,9 +203,14 @@ export default function PracticeClient() {
   const [sessionClientId, setSessionClientId] = useState<string>(() => createClientSessionId());
   const [engagementNotice, setEngagementNotice] = useState<string | null>(null);
   const [timingNotice, setTimingNotice] = useState<string | null>(null);
+  const [toolsOpen, setToolsOpen] = useState(false);
 
   const [questionSecondsLeft, setQuestionSecondsLeft] = useState<number | null>(null);
   const [examSecondsLeft, setExamSecondsLeft] = useState<number | null>(null);
+  const [examDraftAnswers, setExamDraftAnswers] = useState<Record<string, string>>({});
+  const [examMarked, setExamMarked] = useState<Record<string, boolean>>({});
+  const [examStartedAtMs, setExamStartedAtMs] = useState<number>(() => Date.now());
+  const [historySessionId, setHistorySessionId] = useState<string | null>(null);
 
   const q = questions[idx];
   const total = questions.length;
@@ -216,8 +228,13 @@ export default function PracticeClient() {
 
   const answeredCount = sessionAnalysis.reviewedCount;
   const correctCount = sessionAnalysis.correctCount;
-  const incorrectCount = sessionAnalysis.incorrectCount;
   const accuracyPct = sessionAnalysis.accuracyPct;
+
+  const examAnsweredCount = useMemo(() => Object.keys(examDraftAnswers).length, [examDraftAnswers]);
+  const examMarkedCount = useMemo(
+    () => Object.values(examMarked).filter(Boolean).length,
+    [examMarked]
+  );
 
   const scoreBand = useMemo(() => {
     return estimateScoreBand({
@@ -230,17 +247,19 @@ export default function PracticeClient() {
 
   const repairTopic = sessionAnalysis.primaryRepairTarget?.topic ?? null;
   const repairSubject = useMemo(() => {
-    if (!repairTopic) return subject;
+    if (!repairTopic) return subject === "Combined" ? "Reading" : subject;
     const found = Object.values(answers).find(
       (answer) => (answer.topic?.trim() || "Unknown") === repairTopic
     );
-    return (found?.subject as "Reading" | "Math") || subject;
+    return (found?.subject as "Reading" | "Math") || (subject === "Combined" ? "Reading" : subject);
   }, [answers, repairTopic, subject]);
 
   const repairPracticeHref = repairTopic
     ? `/practice?subject=${repairSubject}&subskill=${encodeURIComponent(repairTopic)}`
     : `/practice?subject=${subject}`;
   const repairLessonHref = repairTopic ? `/lesson/${encodeURIComponent(repairTopic)}` : "/lessons";
+  const hasMathTools = subject === "Math" || subject === "Combined" || q?.subject === "Math";
+  const toolsTopicHint = q?.topic || subskill || (subject === "Combined" ? q?.subject || "Math" : subject);
 
   const sessionOutcome = useMemo(() => {
     if (mode !== "done" || total === 0) return null;
@@ -289,7 +308,11 @@ export default function PracticeClient() {
   }
 
   function resetQuestionUI() {
-    setSelected(null);
+    if (practiceMode === "exam" && q) {
+      setSelected(examDraftAnswers[q.id] ?? null);
+    } else {
+      setSelected(null);
+    }
     setLocked(false);
     setFeedback(null);
     setAiExplain(null);
@@ -298,17 +321,17 @@ export default function PracticeClient() {
     setStartedAt(Date.now());
   }
 
-  function resetTimingState(questionCount: number) {
+  function resetTimingState() {
     setTimingNotice(null);
     if (practiceMode === "timed") {
-      setQuestionSecondsLeft(questionTimeLimitSeconds(subject));
+      setQuestionSecondsLeft(questionTimeLimitSeconds((questions[0]?.subject as "Reading" | "Math" | "Combined") || subject));
       setExamSecondsLeft(null);
       return;
     }
 
     if (practiceMode === "exam") {
       setQuestionSecondsLeft(null);
-      setExamSecondsLeft(examTimeLimitSeconds(subject, questionCount));
+      setExamSecondsLeft(examTimeLimitSeconds(questions));
       return;
     }
 
@@ -319,6 +342,11 @@ export default function PracticeClient() {
   function pick(letter: string) {
     if (locked || saving) return;
     setSelected(letter);
+  }
+
+  function toggleExamMarkCurrent() {
+    if (!q) return;
+    setExamMarked((prev) => ({ ...prev, [q.id]: !prev[q.id] }));
   }
 
   async function ensureAuthAndLoad() {
@@ -349,14 +377,36 @@ export default function PracticeClient() {
       }
 
       const { data, error } = await supabase.rpc("get_practice_questions", {
-        p_subject: subject,
-        p_subskill: subskill,
-        p_limit: limit,
+        p_subject: subject === "Combined" ? "Reading" : subject,
+        p_subskill: subject === "Combined" ? null : subskill,
+        p_limit: subject === "Combined" ? Math.ceil(limit / 2) : limit,
       });
 
       if (error) throw new Error(error.message);
 
-      const list = (data ?? []) as Question[];
+      let list = (data ?? []) as Question[];
+
+      if (subject === "Combined") {
+        const { data: mathData, error: mathError } = await supabase.rpc("get_practice_questions", {
+          p_subject: "Math",
+          p_subskill: null,
+          p_limit: Math.floor(limit / 2),
+        });
+
+        if (mathError) throw new Error(mathError.message);
+
+        const reading = list;
+        const math = (mathData ?? []) as Question[];
+        const mixed: Question[] = [];
+        const maxLen = Math.max(reading.length, math.length);
+
+        for (let i = 0; i < maxLen; i += 1) {
+          if (reading[i]) mixed.push(reading[i]);
+          if (math[i]) mixed.push(math[i]);
+        }
+
+        list = mixed.slice(0, limit);
+      }
       if (!list.length) throw new Error("No questions returned for this filter.");
 
       setQuestions(list);
@@ -367,8 +417,13 @@ export default function PracticeClient() {
       setShareText("");
       setCopiedShare(false);
       setSessionClientId(createClientSessionId());
+      setHistorySessionId(null);
+      setToolsOpen(false);
+      setExamDraftAnswers({});
+      setExamMarked({});
+      setExamStartedAtMs(Date.now());
       resetQuestionUI();
-      resetTimingState(list.length || limit);
+      resetTimingState();
       setMode("setup");
     } catch (e: unknown) {
       setErr(errorMessage(e, "Failed to load practice."));
@@ -394,6 +449,13 @@ export default function PracticeClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subject, subskill]);
 
+  function switchSubject(nextSubject: "Reading" | "Math" | "Combined") {
+    const params = new URLSearchParams(sp.toString());
+    params.set("subject", nextSubject);
+    params.delete("subskill");
+    router.push(`/practice?${params.toString()}`);
+  }
+
   function startSession() {
     setMode("in_session");
     setIdx(0);
@@ -403,8 +465,32 @@ export default function PracticeClient() {
     setShareText("");
     setCopiedShare(false);
     setSessionClientId(createClientSessionId());
+    setHistorySessionId(null);
+    setToolsOpen(false);
+    setExamDraftAnswers({});
+    setExamMarked({});
+    setExamStartedAtMs(Date.now());
     resetQuestionUI();
-    resetTimingState(questions.length || limit);
+    resetTimingState();
+  }
+
+  function buildTopicSnapshots(source: Record<string, AnswerInsert>) {
+    const buckets = new Map<string, { subject: string | null; correct: number; total: number }>();
+    for (const answer of Object.values(source)) {
+      const key = (answer.topic?.trim() || "Unknown");
+      if (!buckets.has(key)) {
+        buckets.set(key, { subject: answer.subject || null, correct: 0, total: 0 });
+      }
+      const bucket = buckets.get(key)!;
+      bucket.total += 1;
+      if (answer.is_correct) bucket.correct += 1;
+    }
+    return [...buckets.entries()].map(([topic, value]) => ({
+      topic,
+      subject: value.subject,
+      correctCount: value.correct,
+      totalCount: value.total,
+    }));
   }
 
   const finishSession = useCallback(async (finalAnswers?: Record<string, AnswerInsert>) => {
@@ -429,7 +515,7 @@ export default function PracticeClient() {
       setShareText(
         createShareText({
           nickname: "Student",
-          mode: "practice",
+          mode: practiceMode === "exam" ? "practice" : "practice",
           correct,
           answered,
           accuracyPct: applied.payoff.accuracyPct,
@@ -438,13 +524,103 @@ export default function PracticeClient() {
           division: applied.status.division.label,
         })
       );
+
+      const history = await recordStudySession({
+        clientSessionId: sessionClientId,
+        mode: practiceMode === "exam" ? "exam" : "practice",
+        variant: practiceMode,
+        subject: subject === "Combined" ? "Combined" : subject,
+        subskill: subskill || null,
+        totalQuestions: total,
+        answeredCount: answered,
+        correctCount: correct,
+        durationSeconds: Math.max(0, Math.round((Date.now() - examStartedAtMs) / 1000)),
+        outcome: sessionAnalysis.outcome,
+        scoreBandLow: scoreBand.low,
+        scoreBandHigh: scoreBand.high,
+        topics: buildTopicSnapshots(source),
+      });
+      setHistorySessionId(history.sessionId);
     } catch (e: unknown) {
       setSessionPayoff(null);
       setEngagementNotice(errorMessage(e, "Session results saved, but durable engagement sync failed."));
     }
 
     setMode("done");
-  }, [answers, sessionClientId, total]);
+    setToolsOpen(false);
+  }, [answers, sessionClientId, total, practiceMode, subject, subskill, examStartedAtMs, sessionAnalysis.outcome, scoreBand.low, scoreBand.high]);
+
+  const finalizeExamSession = useCallback(async (args?: { forceAutoFill?: boolean }) => {
+    if (!questions.length || saving) return;
+    setSaving(true);
+    setErr(null);
+
+    try {
+      const working = { ...examDraftAnswers };
+      const unanswered = questions.filter((question) => !working[question.id]);
+      if (unanswered.length > 0 && args?.forceAutoFill) {
+        for (const question of unanswered) {
+          working[question.id] = autoOptionForQuestion(question.id);
+        }
+        setTimingNotice(`Exam submitted with ${unanswered.length} auto-filled unanswered question(s).`);
+      } else if (unanswered.length > 0) {
+        setErr(`You still have ${unanswered.length} unanswered question(s). Answer or auto-fill by submitting after timer expires.`);
+        setSaving(false);
+        return;
+      }
+
+      const now = Date.now();
+      const elapsed = Math.max(1, Math.round((now - examStartedAtMs) / 1000));
+      const avgPerQuestion = Math.max(5, Math.round(elapsed / Math.max(questions.length, 1)));
+
+      const nextAnswers: Record<string, AnswerInsert> = {};
+      for (const question of questions) {
+        const chosen = working[question.id]!;
+        const recorded = await recordAnswerEvent({
+          questionId: question.id,
+          selectedOption: chosen,
+          mode: "practice",
+          timeTakenSeconds: avgPerQuestion,
+        });
+
+        nextAnswers[question.id] = {
+          question_id: question.id,
+          selected_option: recorded.selectedOption,
+          is_correct: recorded.isCorrect,
+          is_review: false,
+          time_taken_seconds: avgPerQuestion,
+          subject: question.subject || subject,
+          topic: question.topic ?? (subskill || null),
+        };
+      }
+
+      setAnswers(nextAnswers);
+      setExamDraftAnswers(working);
+      setMomentum((prev) => ({
+        ...prev,
+        answered: questions.length,
+        total: questions.length,
+        progressPct: 100,
+      }));
+      await finishSession(nextAnswers);
+    } catch (e: unknown) {
+      setErr(errorMessage(e, "Failed to finalize exam session."));
+    } finally {
+      setSaving(false);
+    }
+  }, [examDraftAnswers, examStartedAtMs, finishSession, questions, saving, subject, subskill]);
+
+  const jumpToQuestion = useCallback((nextIdx: number) => {
+    const safe = Math.max(0, Math.min(questions.length - 1, nextIdx));
+    setIdx(safe);
+    if (practiceMode === "exam") {
+      const nextQuestionId = questions[safe]?.id;
+      setSelected(nextQuestionId ? examDraftAnswers[nextQuestionId] ?? null : null);
+    }
+    setAiExplain(null);
+    setAiExplainError(null);
+    setAiExplainLoading(false);
+  }, [examDraftAnswers, practiceMode, questions]);
 
   const submitAnswer = useCallback(async (args?: {
     forcedOption?: string;
@@ -457,6 +633,22 @@ export default function PracticeClient() {
 
     const chosen = (args?.forcedOption || selected || "").toUpperCase();
     if (!["A", "B", "C", "D"].includes(chosen)) return;
+
+    if (practiceMode === "exam") {
+      setExamDraftAnswers((prev) => ({ ...prev, [q.id]: chosen }));
+      setSelected(chosen);
+      if (args?.forceFinish) {
+        await finalizeExamSession({ forceAutoFill: true });
+        return;
+      }
+      const isLast = idx >= questions.length - 1;
+      if (isLast) {
+        await finalizeExamSession({ forceAutoFill: false });
+      } else {
+        jumpToQuestion(idx + 1);
+      }
+      return;
+    }
 
     setSaving(true);
     setErr(null);
@@ -497,17 +689,6 @@ export default function PracticeClient() {
         })
       );
 
-      if (practiceMode === "exam") {
-        const isLast = idx >= questions.length - 1;
-        if (isLast || args?.forceFinish) {
-          await finishSession(nextAnswers);
-        } else {
-          setIdx((i) => i + 1);
-          resetQuestionUI();
-        }
-        return;
-      }
-
       if (args?.timedOut) {
         setSelected(chosen);
       }
@@ -520,8 +701,9 @@ export default function PracticeClient() {
     }
   }, [
     answers,
-    finishSession,
+    finalizeExamSession,
     idx,
+    jumpToQuestion,
     locked,
     practiceMode,
     q,
@@ -567,15 +749,10 @@ export default function PracticeClient() {
     if (examSecondsLeft === null) return;
 
     if (examSecondsLeft <= 0) {
-      const forced = selected?.toUpperCase() || autoOptionForQuestion(q?.id || "fallback");
       const timeout = window.setTimeout(() => {
-        setTimingNotice(
-          selected
-            ? "Exam time expired. Current answer was auto-submitted and block ended."
-            : `Exam time expired. Auto-locked on ${forced} and block ended.`
-        );
+        setTimingNotice("Exam time expired. Submitting exam shell now.");
         setExamSecondsLeft(null);
-        void submitAnswer({ forcedOption: forced, timedOut: true, forceFinish: true });
+        void finalizeExamSession({ forceAutoFill: true });
       }, 0);
       return () => window.clearTimeout(timeout);
     }
@@ -585,7 +762,7 @@ export default function PracticeClient() {
     }, 1000);
 
     return () => window.clearTimeout(timer);
-  }, [mode, practiceMode, examSecondsLeft, saving, selected, q, submitAnswer]);
+  }, [mode, practiceMode, examSecondsLeft, saving, finalizeExamSession]);
 
   async function generateAiExplanation() {
     if (!q || !selected || aiExplainLoading) return;
@@ -632,7 +809,7 @@ export default function PracticeClient() {
 
     setIdx((i) => i + 1);
     if (practiceMode === "timed") {
-      setQuestionSecondsLeft(questionTimeLimitSeconds(subject));
+      setQuestionSecondsLeft(questionTimeLimitSeconds((questions[idx + 1]?.subject as "Reading" | "Math" | "Combined") || subject));
     }
     resetQuestionUI();
   }
@@ -648,6 +825,13 @@ export default function PracticeClient() {
       setCopiedShare(false);
     }
   }
+
+  const subjectSummary =
+    subject === "Combined"
+      ? "Reading + Math mixed"
+      : subskill
+      ? `${subject} targeted run`
+      : `${subject} focus`;
 
   const modeLabel =
     practiceMode === "trainer" ? "Trainer" : practiceMode === "timed" ? "Timed" : "Exam";
@@ -666,8 +850,8 @@ export default function PracticeClient() {
         title="Practice"
         subtitle={
           subskill
-            ? `${subject} • ${modeLabel} mode • focused on ${subskill}`
-            : `${subject} • ${modeLabel} mode • focused 12-question session`
+            ? `${subjectSummary} • ${modeLabel} mode • focused on ${subskill}`
+            : `${subjectSummary} • ${modeLabel} mode • focused 12-question session`
         }
         right={
           <button
@@ -704,220 +888,263 @@ export default function PracticeClient() {
 
       {!loading && !err && mode === "setup" && questions.length > 0 && (
         <div className="grid gap-4">
-          {identity && identityStatus && (
-            <IdentityStatusCard
-              identity={identity}
-              status={identityStatus}
-              title="Engagement system"
-              subtitle={`${identityStatus.division.label} • Level ${identityStatus.level}`}
-              note="Daily consistency, session quality, and completion discipline now feed one visible identity track."
-            />
-          )}
-
           {engagementNotice && (
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
               {engagementNotice}
             </div>
           )}
 
-          <Card
-            title="Predicted score band"
-            subtitle="Range estimate only. It updates from real recorded performance, not hype math."
-            right={<Pill text={`${scoreBand.confidence} confidence`} tone="accent" />}
-            accent
-          >
-            <div className="grid gap-4 sm:grid-cols-3">
-              <StatBox label="Estimated range" value={`${scoreBand.low}–${scoreBand.high}`} hint="SAT total (range)" accent />
-              <StatBox label="Center" value={`${scoreBand.center}`} hint="Middle of current estimate" />
-              <StatBox label="Signal size" value={`${scoreBand.signalAnswers}`} hint="Recorded answers behind this range" />
-            </div>
-            <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
-              This estimate is deliberately conservative and band-based. Wider bands mean the signal is still thin.
-            </div>
-          </Card>
+          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
+            <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.25fr_0.75fr]">
+              <div>
+                <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
+                  Session launchpad
+                </div>
+                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">Commit to one full block</h2>
+                <p className="mt-2 text-sm text-[#d2dbec]">Pick pressure mode, then finish without context switching.</p>
 
-          <Card
-            title="Practice mode"
-            subtitle="Choose the pressure profile before you start."
-            right={<Pill text={modeLabel} tone="accent" />}
-          >
-            <div className="grid gap-3 md:grid-cols-3">
-              {PRACTICE_MODES.map((m) => {
-                const active = practiceMode === m.key;
-                return (
+                <div className="mt-5 grid gap-3 md:grid-cols-3">
+                  {(["Reading", "Math", "Combined"] as const).map((option) => {
+                    const active = subject === option;
+                    const note =
+                      option === "Reading"
+                        ? "Reading-only block"
+                        : option === "Math"
+                        ? "Math-only block"
+                        : "Mixed Reading + Math block";
+
+                    return (
+                      <button
+                        key={option}
+                        onClick={() => switchSubject(option)}
+                        className={[
+                          "rounded-xl border p-4 text-left transition",
+                          active
+                            ? "border-[#8ab8ff] bg-white text-[#0f1b33] shadow-sm"
+                            : "border-[#3e557e] bg-white/5 text-white hover:border-[#5f7dae] hover:bg-white/10",
+                        ].join(" ")}
+                      >
+                        <div className={`text-sm font-semibold ${active ? "text-[#0f1b33]" : "text-white"}`}>{option}</div>
+                        <div className={`mt-2 text-xs ${active ? "text-[#1f3358]" : "text-[#cfdbf3]"}`}>{note}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  {PRACTICE_MODES.map((m) => {
+                    const active = practiceMode === m.key;
+                    return (
+                      <button
+                        key={m.key}
+                        onClick={() => setPracticeMode(m.key)}
+                        className={[
+                          "rounded-xl border p-4 text-left transition",
+                          active
+                            ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33] shadow-sm"
+                            : "border-[#3e557e] bg-white/5 text-white hover:border-[#5f7dae] hover:bg-white/10",
+                        ].join(" ")}
+                      >
+                        <div className={`text-sm font-semibold ${active ? "text-[#0f1b33]" : "text-white"}`}>{m.label}</div>
+                        <div className={`mt-2 text-xs ${active ? "text-[#23375d]" : "text-[#cfdbf3]"}`}>{m.note}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl border border-[#3e557e] bg-white/5 px-3 py-3 text-sm text-[#cbd8f0]">
+                    Subject: <span className="font-semibold text-white">{subject}</span>
+                  </div>
+                  <div className="rounded-xl border border-[#3e557e] bg-white/5 px-3 py-3 text-sm text-[#cbd8f0]">
+                    Mode: <span className="font-semibold text-white">{modeLabel}</span>
+                  </div>
+                  <div className="rounded-xl border border-[#3e557e] bg-white/5 px-3 py-3 text-sm text-[#cbd8f0]">
+                    Questions: <span className="font-semibold text-white">{limit}</span>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
                   <button
-                    key={m.key}
-                    onClick={() => setPracticeMode(m.key)}
-                    className={[
-                      "rounded-xl border p-4 text-left transition",
-                      active
-                        ? "border-[#004aad] bg-[#eef4ff]"
-                        : "border-gray-200 bg-white hover:border-gray-300",
-                    ].join(" ")}
+                    onClick={startSession}
+                    className="inline-flex items-center justify-center rounded-xl bg-white px-4 py-3 text-sm font-semibold text-[#0f1b33] transition hover:bg-[#ecf3ff]"
                   >
-                    <div className="text-sm font-semibold text-black">{m.label}</div>
-                    <div className="mt-2 text-xs leading-relaxed text-gray-700">{m.note}</div>
+                    Start session
                   </button>
-                );
-              })}
-            </div>
-
-            <div className="mt-4 rounded-xl border border-gray-200 p-4 text-sm text-gray-700">
-              {practiceMode === "trainer" && (
-                <span>Trainer mode is explanation-forward and best for targeted repair cycles.</span>
-              )}
-              {practiceMode === "timed" && (
-                <span>
-                  Timed mode sets {formatClock(questionTimeLimitSeconds(subject))} per question in this {subject} block.
-                </span>
-              )}
-              {practiceMode === "exam" && (
-                <span>
-                  Exam mode sets one strict {formatClock(examTimeLimitSeconds(subject, limit))} block timer and hides correctness until completion.
-                </span>
-              )}
-            </div>
-          </Card>
-
-          <Card
-            title="Session setup"
-            subtitle="Confirm the mission, lock the first win quickly, and finish clean for full payoff."
-            right={<Pill text={subskill ? "Targeted" : "General"} tone="accent" />}
-            accent
-          >
-            <div className="grid gap-4 sm:grid-cols-4">
-              <StatBox label="Subject" value={subject} hint="Selected practice track" accent />
-              <StatBox
-                label="Mode"
-                value={modeLabel}
-                hint={practiceMode === "trainer" ? "Feedback-forward" : practiceMode === "timed" ? "Per-question pressure" : "Strict simulation"}
-              />
-              <StatBox label="Questions" value={String(limit)} hint="Fixed session size" />
-              <StatBox
-                label="Signal"
-                value={confidenceLabel(limit)}
-                hint="Good enough to guide next action"
-              />
-            </div>
-
-            <div className="mt-5 rounded-xl border border-gray-200 p-4">
-              <div className="text-sm font-semibold text-black">What happens in this session</div>
-              <div className="mt-2 text-sm leading-relaxed text-gray-700">
-                You will do a clean 12-question set. Each submitted answer is recorded to backend truth and still feeds review scheduling.
-              </div>
-
-              <div className="mt-4 grid gap-2 sm:grid-cols-3">
-                <div className="rounded-lg border border-[#c7dbff] bg-[#f6faff] px-3 py-2 text-xs text-[#004aad]">
-                  Instant reward: <span className="font-semibold">XP + combo</span>
-                </div>
-                <div className="rounded-lg border border-[#c7dbff] bg-[#f6faff] px-3 py-2 text-xs text-[#004aad]">
-                  Finish bonus: <span className="font-semibold">+36 XP</span>
-                </div>
-                <div className="rounded-lg border border-[#c7dbff] bg-[#f6faff] px-3 py-2 text-xs text-[#004aad]">
-                  Accuracy bonus: <span className="font-semibold">up to +22 XP</span>
+                  <Link
+                    href="/today"
+                    className="inline-flex items-center justify-center rounded-xl border border-[#506894] bg-white/5 px-4 py-3 text-sm font-semibold text-[#d7e3fb] transition hover:border-[#6f8ec7] hover:bg-white/10"
+                  >
+                    Back to Today
+                  </Link>
                 </div>
               </div>
 
-              {subskill && (
-                <div className="mt-3 text-sm leading-relaxed text-gray-700">
-                  This run is focused on <span className="font-semibold">{subskill}</span>, so the goal is
-                  not broad coverage — it is cleaner repair of one weak zone.
+              <div className="grid gap-3">
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Score band</div>
+                  <div className="mt-2 text-3xl font-semibold tracking-tight text-white">
+                    {scoreBand.low}–{scoreBand.high}
+                  </div>
+                  <div className="mt-2 text-xs text-[#c8d4ed]">
+                    {scoreBand.confidence} confidence • {scoreBand.signalAnswers} answers backing estimate
+                  </div>
                 </div>
-              )}
+
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Payoff model</div>
+                  <div className="mt-2 text-sm text-[#d2dbec]">Base accuracy XP + completion bonus + combo pressure.</div>
+                  {identity && identityStatus && (
+                    <div className="mt-3 text-xs text-[#c8d4ed]">
+                      {identityStatus.division.label} L{identityStatus.level} • {identity.streakDays}d streak
+                    </div>
+                  )}
+                </div>
+
+                {subskill && (
+                  <Link
+                    href={`/lesson/${encodeURIComponent(subskill)}`}
+                    className="inline-flex items-center justify-center rounded-xl border border-[#506894] bg-white/5 px-4 py-3 text-sm font-semibold text-[#d7e3fb] transition hover:border-[#6f8ec7] hover:bg-white/10"
+                  >
+                    Open lesson before run
+                  </Link>
+                )}
+              </div>
             </div>
 
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <PrimaryButton onClick={startSession}>Start session</PrimaryButton>
-              <SecondaryButton href="/skills">Open skills</SecondaryButton>
-              {subskill ? (
-                <SecondaryButton href={`/lesson/${encodeURIComponent(subskill)}`}>Open lesson</SecondaryButton>
-              ) : (
-                <SecondaryButton href={`/practice?subject=${subject === "Reading" ? "Math" : "Reading"}`}>
-                  Switch subject
-                </SecondaryButton>
-              )}
-              <SecondaryButton href="/today">Back to Today</SecondaryButton>
-            </div>
-          </Card>
+            {(subject === "Math" || subject === "Combined") && (
+              <div className="border-t border-white/10 bg-black/10 p-4 sm:px-6">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">SAT tool layer</div>
+                    <div className="mt-1 text-sm font-semibold text-white">Formula + calculator strategy available in-session</div>
+                  </div>
+                  <button
+                    onClick={() => setToolsOpen(true)}
+                    className="rounded-lg border border-[#4f6693] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb]"
+                  >
+                    Open tools
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
         </div>
       )}
 
       {!loading && !err && mode === "in_session" && q && (
-        <div className="grid gap-4">
-          <MomentumRail
-            momentum={momentum}
-            title="Session momentum"
-            subtitle={
-              practiceMode === "exam"
-                ? "Strict mode active. No correctness reveal until block completion."
-                : "Protect the combo and keep energy high through the final question."
-            }
-          />
+        <div className="grid gap-5">
+          <div className="sticky top-[4.5rem] z-20 overflow-hidden rounded-2xl border border-[#22345e] bg-[linear-gradient(145deg,#0f172a,#111d35)] p-4 shadow-xl backdrop-blur">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-white">
+                {subject === "Combined" ? `${q.subject} live` : modeLabel} • Question {Math.min(idx + 1, total)} / {total}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Pill text={modePill} tone={practiceMode === "trainer" ? "neutral" : "accent"} />
+                <Pill text={`Combo ${momentum.combo}`} tone={momentum.currentStreak >= 4 ? "success" : "neutral"} />
+                {hasMathTools && (
+                  <button
+                    onClick={() => setToolsOpen(true)}
+                    className="rounded-full border border-[#4f6795] bg-white/10 px-3 py-1 text-xs font-semibold text-[#d7e3fb] transition hover:bg-white/20"
+                  >
+                    Tools
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-3 h-2.5 rounded-full bg-white/10">
+              <div
+                className="h-full rounded-full bg-[linear-gradient(90deg,#7eb5ff,#b9d9ff)]"
+                style={{ width: `${momentum.progressPct}%` }}
+              />
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-[#c8d4ed]">
+              <div>Answered {practiceMode === "exam" ? examAnsweredCount : answeredCount}</div>
+              <div>Correct {correctCount}</div>
+              <div className="text-right">Session XP {momentum.sessionXp}</div>
+            </div>
+            {practiceMode === "exam" && (
+              <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                <div className="rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-xs text-[#cedaf1]">
+                  Marked: <span className="font-semibold text-white">{examMarkedCount}</span>
+                </div>
+                <div className="rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-xs text-[#cedaf1]">
+                  Unanswered: <span className="font-semibold text-white">{Math.max(total - examAnsweredCount, 0)}</span>
+                </div>
+                <button
+                  onClick={() => void finalizeExamSession({ forceAutoFill: false })}
+                  disabled={saving}
+                  className="rounded-lg border border-[#4f6795] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb] disabled:opacity-60"
+                >
+                  Submit exam now
+                </button>
+              </div>
+            )}
+          </div>
 
           {timingNotice && (
-            <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+            <div className="rounded-2xl border border-[#f2c67b] bg-[#fff4e2] p-4 text-sm text-[#8f5c0e]">
               {timingNotice}
             </div>
           )}
 
           <Card
-            title={`Question ${Math.min(idx + 1, total)} / ${total}`}
-            subtitle={
-              practiceMode === "exam"
-                ? "Exam mode: no instant correctness feedback during the block."
-                : subskill
-                ? `Focused on ${subskill}`
-                : "General practice flow"
-            }
-            right={<Pill text={modePill} tone={practiceMode === "trainer" ? "neutral" : "accent"} />}
-            accent
-          >
-            <div className="grid gap-4 sm:grid-cols-4">
-              <StatBox label="Answered" value={`${answeredCount}`} hint="Completed so far" />
-              <StatBox label="Correct" value={`${correctCount}`} hint="Right answers" accent={correctCount > 0} />
-              <StatBox label="Remaining" value={`${Math.max(total - answeredCount, 0)}`} hint="Still ahead" />
-              <StatBox
-                label="Timer"
-                value={
-                  practiceMode === "timed"
-                    ? formatClock(questionSecondsLeft ?? 0)
-                    : practiceMode === "exam"
-                    ? formatClock(examSecondsLeft ?? 0)
-                    : "Open"
-                }
-                hint={practiceMode === "trainer" ? "No timer pressure" : "Pressure active"}
-              />
-            </div>
-          </Card>
-
-          <Card
             title="Current item"
             subtitle={
               practiceMode === "exam"
-                ? "Choose once and lock. You will see correctness at the end of the block."
-                : "Choose the best answer, then inspect the explanation."
+                ? "Strict lock mode. Correctness reveals at block end."
+                : subskill
+                ? `Focused run: ${subskill}`
+                : "Focused practice block"
             }
+            accent
+            prominence="prominent"
           >
-            <div className="text-base font-medium leading-relaxed whitespace-pre-line text-black">
+            <div className="text-lg font-medium leading-relaxed whitespace-pre-line text-[#0f172a]">
               {q.question_text}
             </div>
 
-            <div className="mt-6 space-y-3">
+            {practiceMode === "exam" && (
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  onClick={toggleExamMarkCurrent}
+                    className={`rounded-lg border px-3 py-2 text-xs font-semibold ${
+                    examMarked[q.id] ? "border-[#1a2f58] bg-[#edf5ff] text-[#0f1b33]" : "border-gray-300 bg-white text-gray-700"
+                  }`}
+                >
+                  {examMarked[q.id] ? "Marked for review" : "Mark for review"}
+                </button>
+                <button
+                  onClick={() => setExamDraftAnswers((prev) => {
+                    const next = { ...prev };
+                    delete next[q.id];
+                    setSelected(null);
+                    return next;
+                  })}
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                >
+                  Clear answer
+                </button>
+              </div>
+            )}
+
+            <div className="mt-5 space-y-3">
               {(["A", "B", "C", "D"] as const).map((letter) => {
                 const chosen = selected === letter;
                 const correct = locked && feedback && feedback.correct && q.correct_option.toUpperCase() === letter;
                 const wrongChosen = locked && chosen && feedback && !feedback.correct;
 
-                let cls = "border border-gray-200 bg-white";
-                if (chosen) cls = "border-[#004aad] bg-[#eef4ff]";
-                if (correct) cls = "border-green-600 bg-green-50";
-                if (wrongChosen) cls = "border-red-600 bg-red-50";
+                let cls = "border border-gray-200 bg-white shadow-sm";
+                if (chosen) cls = "border-[#0f1b33] bg-[#edf5ff] shadow-md";
+                if (correct) cls = "border-[#2a9b67] bg-[#edfcf3] shadow-md";
+                if (wrongChosen) cls = "border-[#d54768] bg-[#fff2f5] shadow-md";
 
                 return (
                   <button
                     key={letter}
                     onClick={() => pick(letter)}
-                    className={`w-full rounded-xl p-4 text-left ${cls}`}
+                    className={`w-full rounded-2xl p-4 text-left transition ${cls}`}
                     disabled={saving || (practiceMode !== "exam" && locked)}
                   >
                     <div className="mb-1 text-xs font-semibold text-gray-500">{letter}</div>
@@ -927,57 +1154,56 @@ export default function PracticeClient() {
               })}
             </div>
 
-            <div className="mt-6 flex gap-3 items-start">
+            <div className="mt-5">
               {practiceMode === "exam" ? (
                 <button
-                  className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
+                  className="w-full rounded-xl bg-[#0e1b34] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#1a2b4a] disabled:opacity-60 sm:w-auto"
                   onClick={submit}
                   disabled={!selected || saving}
                 >
-                  {idx === total - 1 ? (saving ? "Saving…" : "Submit & finish") : saving ? "Saving…" : "Lock answer"}
+                  {idx === total - 1 ? (saving ? "Saving…" : "Save & submit exam") : saving ? "Saving…" : "Save & next"}
                 </button>
               ) : !locked ? (
                 <button
-                  className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
+                  className="w-full rounded-xl bg-[#0e1b34] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#1a2b4a] disabled:opacity-60 sm:w-auto"
                   onClick={submit}
                   disabled={!selected || saving}
                 >
-                  Submit
+                  Submit answer
                 </button>
               ) : (
                 <button
-                  className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
+                  className="w-full rounded-xl bg-[#0e1b34] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#1a2b4a] disabled:opacity-60 sm:w-auto"
                   onClick={nextOrFinish}
                   disabled={saving}
                 >
-                  {idx === total - 1 ? (saving ? "Saving…" : "Finish") : "Next"}
+                  {idx === total - 1 ? (saving ? "Saving…" : "Finish session") : "Next question"}
                 </button>
               )}
+            </div>
 
-              {practiceMode !== "exam" && locked && feedback && (
-                <div className="flex-1 rounded-xl border border-gray-200 p-4">
-                  <div className={`font-semibold ${feedback.correct ? "text-green-700" : "text-red-700"}`}>
-                    {feedback.correct ? "Correct" : "Incorrect"}
+            {practiceMode !== "exam" && locked && feedback && (
+              <div className={`mt-5 rounded-2xl border p-5 ${feedback.correct ? "border-[#9de0bb] bg-[#ebfdf2]" : "border-[#f5b8c4] bg-[#fff2f5]"}`}>
+                <div className={`font-semibold ${feedback.correct ? "text-[#0f8a4e]" : "text-[#b02039]"}`}>
+                  {feedback.correct ? "Correct. Keep the run alive." : "Miss. Recover immediately."}
+                </div>
+                <div className="mt-1 text-xs text-gray-700">+{momentum.instantXp} XP • Combo {momentum.combo}</div>
+
+                {!feedback.correct && (
+                  <div className="mt-2 text-sm text-gray-700">
+                    Correct answer: <span className="font-semibold">{feedback.correctOption}</span>
                   </div>
+                )}
 
-                  <div className="mt-1 text-xs text-gray-600">
-                    Reward: +{momentum.instantXp} XP • Combo {momentum.combo}
+                {q.explanation ? (
+                  <div className="mt-3 text-sm text-gray-700 whitespace-pre-line">
+                    <span className="font-semibold">Explanation:</span> {q.explanation}
                   </div>
+                ) : (
+                  <div className="mt-3 text-sm text-gray-600">No explanation available yet.</div>
+                )}
 
-                  {!feedback.correct && (
-                    <div className="mt-1 text-sm text-gray-700">
-                      Correct answer: <span className="font-semibold">{feedback.correctOption}</span>
-                    </div>
-                  )}
-
-                  {q.explanation ? (
-                    <div className="mt-3 text-sm text-gray-700 whitespace-pre-line">
-                      <span className="font-semibold">Explanation:</span> {q.explanation}
-                    </div>
-                  ) : (
-                    <div className="mt-3 text-sm text-gray-600">No explanation available yet.</div>
-                  )}
-
+                <div className="mt-3">
                   <QuestionActionBlock
                     mode="practice"
                     questionId={q.id}
@@ -987,59 +1213,138 @@ export default function PracticeClient() {
                     aiExplainLoading={aiExplainLoading}
                     aiExplainError={aiExplainError}
                     aiExplain={aiExplain}
-                    footerNote="Practice generates forward signal. Review handles later recovery."
+                    footerNote="Practice creates signal. Review handles later recovery."
                   />
                 </div>
-              )}
-            </div>
-
-            <div className="mt-6 flex flex-wrap gap-4 text-xs text-gray-500">
-              <span>This session is designed to generate a clean next action.</span>
-              <Link href="/review" className="underline hover:text-black">
-                Open review
-              </Link>
-            </div>
+              </div>
+            )}
           </Card>
+
+          {practiceMode === "exam" && (
+            <Card title="Question navigator" subtitle="Jump between items, revisit marked questions, then submit.">
+              <div className="grid grid-cols-6 gap-2 sm:grid-cols-8 lg:grid-cols-12">
+                {questions.map((question, qIdx) => {
+                  const isCurrent = idx === qIdx;
+                  const isMarked = !!examMarked[question.id];
+                  const isAnswered = !!examDraftAnswers[question.id];
+                  return (
+                    <button
+                      key={question.id}
+                      onClick={() => jumpToQuestion(qIdx)}
+                      className={[
+                        "rounded-lg border px-2 py-2 text-xs font-semibold transition",
+                        isCurrent
+                          ? "border-[#0f1b33] bg-[#0f1b33] text-white"
+                          : isMarked
+                          ? "border-[#6b7893] bg-[#eef3fb] text-[#0f1b33]"
+                          : isAnswered
+                          ? "border-[#9de0bb] bg-[#ebfdf2] text-[#0f8a4e]"
+                          : "border-gray-200 bg-white text-gray-600 hover:border-gray-300",
+                      ].join(" ")}
+                    >
+                      {qIdx + 1}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="mt-3 grid gap-2 text-xs text-gray-600 sm:grid-cols-3">
+                <div>Answered {examAnsweredCount}/{total}</div>
+                <div>Marked {examMarkedCount}</div>
+                <div>Unanswered {Math.max(total - examAnsweredCount, 0)}</div>
+              </div>
+            </Card>
+          )}
+
         </div>
       )}
 
       {!loading && !err && mode === "done" && (
         <div className="grid gap-4">
+          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
+            <div className="grid gap-4 p-5 sm:p-6 lg:grid-cols-[1.05fr_0.95fr]">
+              <div>
+                <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
+                  Session complete
+                </div>
+                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+                  {sessionOutcome?.title ?? "Execution complete"}
+                </h2>
+                <p className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
+                  {sessionOutcome?.note ?? "Choose the next route while the signal is still fresh."}
+                </p>
+                <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
+                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
+                    Score: <span className="font-semibold text-white">{correctCount}/{total}</span>
+                  </div>
+                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
+                    Accuracy: <span className="font-semibold text-white">{sessionAnalysis.accuracyPct}%</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-3">
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Predicted score band</div>
+                  <div className="mt-2 text-3xl font-semibold tracking-tight text-white">{scoreBand.low}–{scoreBand.high}</div>
+                  <div className="mt-1 text-xs text-[#c8d4ed]">{scoreBand.confidence} confidence estimate</div>
+                </div>
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Next execution</div>
+                  <div className="mt-2 text-sm text-[#d2dbec]">
+                    {repairTopic ? `Primary repair target: ${repairTopic}` : "No single failed topic dominated this set."}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
           <Card
             title="Practice session complete"
-            subtitle="Your answers were recorded as you worked. Decide the next best move."
+            subtitle="Execution complete. Choose the next route while the signal is fresh."
             right={sessionOutcome ? <Pill text={sessionOutcome.title} tone={sessionOutcome.tone} /> : null}
             accent
             prominence="prominent"
           >
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <StatBox
-                label="Score"
-                value={`${correctCount}/${total}`}
-                hint="Correct / total"
-                accent={accuracyPct >= 50}
-                size={accuracyPct >= 50 ? "large" : "default"}
-              />
-              <StatBox
-                label="Accuracy"
-                value={`${sessionAnalysis.accuracyPct}%`}
-                hint="This practice session"
-                accent={accuracyPct >= 75}
-                size={accuracyPct >= 75 ? "large" : "default"}
-              />
-              <StatBox label="Incorrect" value={`${incorrectCount}`} hint="Likely to feed review" />
-              <StatBox label="Signal" value={confidenceLabel(total)} hint="Based on session size" />
-            </div>
+            <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+              <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <StatBox
+                    label="Score"
+                    value={`${correctCount}/${total}`}
+                    hint="Correct / total"
+                    accent={accuracyPct >= 50}
+                    size={accuracyPct >= 50 ? "large" : "default"}
+                  />
+                  <StatBox
+                    label="Accuracy"
+                    value={`${sessionAnalysis.accuracyPct}%`}
+                    hint="This session"
+                    accent={accuracyPct >= 75}
+                    size={accuracyPct >= 75 ? "large" : "default"}
+                  />
+                </div>
+                <div className="mt-4 text-sm text-gray-700">
+                  Predicted band <span className="font-semibold text-black">{scoreBand.low}–{scoreBand.high}</span>
+                  <span className="mx-2 text-gray-300">•</span>
+                  {scoreBand.confidence} confidence
+                </div>
+              </div>
 
-            <div className="mt-6 rounded-2xl border border-gray-200 bg-white p-5">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                Predicted score band
-              </div>
-              <div className="mt-2 text-2xl font-semibold tracking-tight text-black">
-                {scoreBand.low}–{scoreBand.high}
-              </div>
-              <div className="mt-2 text-sm text-gray-700">
-                Confidence: {scoreBand.confidence} • Signal size: {scoreBand.signalAnswers} answers
+              <div className="rounded-2xl border border-gray-200 bg-white p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Next execution</div>
+                <div className="mt-2 text-sm text-gray-700">
+                  {repairTopic
+                    ? `Primary repair target: ${repairTopic}`
+                    : "No single failed topic dominated this set."}
+                </div>
+                <div className="mt-4 grid gap-3">
+                  <PrimaryButton href={repairTopic ? repairPracticeHref : undefined} onClick={repairTopic ? undefined : ensureAuthAndLoad}>
+                    {repairTopic ? "Run targeted repair" : "Run next set"}
+                  </PrimaryButton>
+                  <SecondaryButton href={repairTopic ? repairLessonHref : "/review"}>
+                    {repairTopic ? "Open lesson" : "Open review"}
+                  </SecondaryButton>
+                </div>
               </div>
             </div>
 
@@ -1084,21 +1389,10 @@ export default function PracticeClient() {
             )}
 
             {identityStatus && identity && (
-              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                  Retention status
-                </div>
-                <div className="mt-2 text-sm text-gray-700">
-                  Division: <span className="font-semibold text-black">{identityStatus.division.label}</span>
-                  <span className="mx-2 text-gray-300">•</span>
-                  Level {identityStatus.level}
-                  <span className="mx-2 text-gray-300">•</span>
-                  Streak {identity.streakDays}d
-                </div>
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
+                {identityStatus.division.label} • Level {identityStatus.level} • Streak {identity.streakDays}d
                 {identityStatus.nextDivision && (
-                  <div className="mt-2 text-sm text-gray-700">
-                    {pointsToNextDivision(identity)} XP to {identityStatus.nextDivision.label}
-                  </div>
+                  <span className="ml-2 text-gray-500">({pointsToNextDivision(identity)} XP to {identityStatus.nextDivision.label})</span>
                 )}
               </div>
             )}
@@ -1118,35 +1412,27 @@ export default function PracticeClient() {
               </div>
             )}
 
-            {repairTopic && (
-              <div className="mt-5 rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
-                <div className="label label-accent mb-2">Primary repair target</div>
-                <div className="mt-1 text-lg font-semibold text-black">{repairTopic}</div>
-                <div className="mt-2 text-sm text-gray-700">
-                  Subject: {repairSubject}
-                  {sessionAnalysis.primaryRepairTarget && (
-                    <>
-                      {" "}• Accuracy in this session: {Math.round(sessionAnalysis.primaryRepairTarget.accuracy * 100)}%
-                      {" "}({sessionAnalysis.primaryRepairTarget.correct}/{sessionAnalysis.primaryRepairTarget.total})
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <PrimaryButton href={repairTopic ? repairPracticeHref : undefined} onClick={repairTopic ? undefined : ensureAuthAndLoad}>
-                {repairTopic ? "Practice weak topic" : "Run again"}
-              </PrimaryButton>
+            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              {historySessionId ? (
+                <PrimaryButton href={`/history?session=${encodeURIComponent(historySessionId)}`}>Reopen this result</PrimaryButton>
+              ) : (
+                <SecondaryButton href="/history">Open history</SecondaryButton>
+              )}
               <SecondaryButton href="/skills">Open skills</SecondaryButton>
-              <SecondaryButton href={repairTopic ? repairLessonHref : "/review"}>
-                {repairTopic ? "Open lesson" : "Open review"}
-              </SecondaryButton>
               <SecondaryButton href="/today">Back to Today</SecondaryButton>
+              <SecondaryButton href="/review">Open review queue</SecondaryButton>
+              <SecondaryButton href="/coach">Open coach</SecondaryButton>
             </div>
           </Card>
         </div>
       )}
+
+      <MathToolsLayer
+        open={toolsOpen && hasMathTools}
+        onClose={() => setToolsOpen(false)}
+        topicHint={toolsTopicHint}
+        modeLabel={modeLabel}
+      />
     </main>
   );
 }

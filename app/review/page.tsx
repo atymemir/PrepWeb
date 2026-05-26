@@ -22,9 +22,10 @@ import {
   getDurableEngagementSnapshot,
   recordDurableEngagementSession,
 } from "../lib/engagementDurable";
+import { recordStudySession } from "../lib/sessionHistory";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 import QuestionActionBlock from "../components/QuestionActionBlock";
-import { IdentityStatusCard, MomentumRail, SessionPayoffCard } from "../components/EngagementSystem";
+import { SessionPayoffCard } from "../components/EngagementSystem";
 
 type Question = {
   id: string;
@@ -123,6 +124,8 @@ export default function ReviewPage() {
   const [copiedShare, setCopiedShare] = useState(false);
   const [sessionClientId, setSessionClientId] = useState<string>(() => createClientSessionId());
   const [engagementNotice, setEngagementNotice] = useState<string | null>(null);
+  const [historySessionId, setHistorySessionId] = useState<string | null>(null);
+  const [reviewStartedAtMs, setReviewStartedAtMs] = useState<number>(() => Date.now());
 
   const lastSubmitRef = useRef<{
     questionId: string;
@@ -229,6 +232,7 @@ export default function ReviewPage() {
     setIdx(0);
     resetQuestionUI();
     setAnswers({});
+    setHistorySessionId(null);
     lastSubmitRef.current = null;
 
     try {
@@ -273,9 +277,30 @@ export default function ReviewPage() {
     setShareText("");
     setCopiedShare(false);
     setSessionClientId(createClientSessionId());
+    setHistorySessionId(null);
+    setReviewStartedAtMs(Date.now());
     resetQuestionUI();
     setAnswers({});
     lastSubmitRef.current = null;
+  }
+
+  function buildTopicSnapshots(source: Record<string, { selected: string; correct: boolean; topic: string | null; subject: string }>) {
+    const buckets = new Map<string, { subject: string | null; correct: number; total: number }>();
+    for (const answer of Object.values(source)) {
+      const key = (answer.topic?.trim() || "Unknown");
+      if (!buckets.has(key)) {
+        buckets.set(key, { subject: answer.subject || null, correct: 0, total: 0 });
+      }
+      const bucket = buckets.get(key)!;
+      bucket.total += 1;
+      if (answer.correct) bucket.correct += 1;
+    }
+    return [...buckets.entries()].map(([topic, value]) => ({
+      topic,
+      subject: value.subject,
+      correctCount: value.correct,
+      totalCount: value.total,
+    }));
   }
 
   useEffect(() => {
@@ -460,6 +485,21 @@ export default function ReviewPage() {
           division: applied.status.division.label,
         })
       );
+
+      const history = await recordStudySession({
+        clientSessionId: sessionClientId,
+        mode: "review",
+        variant: "recovery",
+        subject: "Mixed",
+        subskill: repairTopic || null,
+        totalQuestions: total,
+        answeredCount: answered,
+        correctCount: correct,
+        durationSeconds: Math.max(0, Math.round((Date.now() - reviewStartedAtMs) / 1000)),
+        outcome: reviewAnalysis.outcome,
+        topics: buildTopicSnapshots(answers),
+      });
+      setHistorySessionId(history.sessionId);
     } catch (e: unknown) {
       setSessionPayoff(null);
       setEngagementNotice(
@@ -536,17 +576,7 @@ export default function ReviewPage() {
       )}
 
       {!loading && !err && mode === "ready" && (
-        <div className="grid gap-6">
-          {identity && identityStatus && (
-            <IdentityStatusCard
-              identity={identity}
-              status={identityStatus}
-              title="Recovery identity"
-              subtitle={`${identityStatus.division.label} • Level ${identityStatus.level}`}
-              note="Review sessions now carry full identity and streak weight, so recovery behavior is visibly rewarded."
-            />
-          )}
-
+        <div className="grid gap-5">
           {engagementNotice && (
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
               {engagementNotice}
@@ -554,82 +584,98 @@ export default function ReviewPage() {
           )}
 
           <Card
-            title="Recovery queue"
-            subtitle="Finish what is due now to preserve momentum and protect your streak quality."
-            right={<Pill text={queueLabel(questions.length)} tone={queueTone} />}
+            title="Recovery command"
+            subtitle="Unfinished mistakes are active debt. Clear them before new volume."
+            right={<Pill text={questions.length > 0 ? `${questions.length} due` : "Queue clear"} tone={queueTone} />}
             accent={questions.length > 0}
-            prominence={questions.length > 0 ? "prominent" : "quiet"}
+            prominence={questions.length > 0 ? "prominent" : "default"}
           >
             {questions.length === 0 ? (
               <>
-                <div className="text-sm text-gray-700">
-                  No review is due right now. Good. That means your queue is clear and you can safely return to fresh practice.
+                <div className="rounded-2xl border border-[#9de0bb] bg-[#ebfdf2] p-4 text-sm text-[#0f8a4e]">
+                  Recovery queue is clear. Forward work is unlocked.
                 </div>
-                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
                   <PrimaryButton href="/practice?subject=Reading">Practice Reading</PrimaryButton>
                   <SecondaryButton href="/practice?subject=Math">Practice Math</SecondaryButton>
                 </div>
               </>
             ) : (
               <>
-                <div className="grid gap-4 sm:grid-cols-3">
-                  <StatBox
-                    label="Due now"
-                    value={String(questions.length)}
-                    hint="Items currently scheduled"
-                    accent
-                  />
-                  <StatBox
-                    label="Session cap"
-                    value={String(limit)}
-                    hint="Maximum pulled into this queue"
-                  />
-                  <StatBox
-                    label="Priority"
-                    value={questions.length >= 6 ? "High" : "Normal"}
-                    hint="Based on current due load"
-                  />
-                </div>
+                <section className="ink-surface overflow-hidden rounded-[28px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
+                  <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.1fr_0.9fr]">
+                    <div>
+                      <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
+                        Debt to clear now
+                      </div>
+                      <div className="mt-2 text-4xl font-semibold tracking-tight text-white">{questions.length}</div>
+                      <div className="mt-2 text-sm text-[#d2dbec]">
+                      {questions.length >= 6 ? "High pressure queue." : "Manageable queue."} Finish this block before starting fresh practice.
+                      </div>
+                      <div className="mt-4 h-2 rounded-full bg-white/10">
+                        <div
+                          className="h-full rounded-full bg-[linear-gradient(90deg,#7eb5ff,#b9d9ff)]"
+                          style={{ width: `${Math.max(14, Math.min(100, (questions.length / limit) * 100))}%` }}
+                        />
+                      </div>
+                    </div>
 
-                <div className="mt-5 text-sm leading-relaxed text-gray-700">
-                  Review is the repair half of the system. Clear due items now so mistakes do not remain active when you go back into fresh practice.
-                </div>
+                    <div className="grid gap-3">
+                      <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-sm text-[#cbd8f0]">
+                        Session cap: <span className="font-semibold text-white">{limit}</span>
+                      </div>
+                      <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-sm text-[#cbd8f0]">
+                        Queue state: <span className="font-semibold text-white">{queueLabel(questions.length)}</span>
+                      </div>
+                      {identity && identityStatus && (
+                        <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-sm text-[#cbd8f0]">
+                          {identityStatus.division.label} L{identityStatus.level} • {identity.streakDays}d streak
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </section>
 
                 <div className="mt-5 grid gap-3 sm:grid-cols-2">
                   <PrimaryButton onClick={startSession}>Start review</PrimaryButton>
-                  <SecondaryButton href="/skills">Open skills</SecondaryButton>
+                  <SecondaryButton href="/today">Back to Today</SecondaryButton>
                 </div>
               </>
             )}
           </Card>
-
-          {questions.length > 0 && (
-            <Card title="What happens after review?" subtitle="The next action depends on how cleanly you recover.">
-              <div className="grid gap-4 sm:grid-cols-3">
-                <StatBox label="<50%" value="Rebuild" hint="Open lesson, then practice again" />
-                <StatBox label="50–74%" value="Stabilize" hint="Do one focused practice set" accent />
-                <StatBox label="75%+" value="Advance" hint="Return to normal forward work" />
-              </div>
-            </Card>
-          )}
         </div>
       )}
 
       {!loading && !err && mode === "in_session" && q && (
-        <div className="grid gap-4">
-          <MomentumRail
-            momentum={momentum}
-            title="Recovery momentum"
-            subtitle="Clear the queue with steady accuracy to keep identity momentum intact."
-          />
+        <div className="grid gap-5">
+          <div className="sticky top-[4.5rem] z-20 overflow-hidden rounded-2xl border border-[#22345e] bg-[linear-gradient(145deg,#0f172a,#111d35)] p-4 shadow-xl backdrop-blur">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-white">
+                Recovery item {idx + 1} / {Math.max(total, 1)}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Pill text={`Accuracy ${accuracyPct}%`} tone={accuracyPct >= 70 ? "success" : "accent"} />
+                <Pill text={`Combo ${momentum.combo}`} tone={momentum.currentStreak >= 3 ? "success" : "neutral"} />
+              </div>
+            </div>
+            <div className="mt-3 h-2.5 rounded-full bg-white/10">
+              <div className="h-full rounded-full bg-[linear-gradient(90deg,#7eb5ff,#b9d9ff)]" style={{ width: `${momentum.progressPct}%` }} />
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-[#c8d4ed]">
+              <div>Cleared {reviewAnalysis.reviewedCount}</div>
+              <div>Correct {reviewAnalysis.correctCount}</div>
+              <div className="text-right">Remaining {Math.max(total - reviewAnalysis.reviewedCount, 0)}</div>
+            </div>
+          </div>
 
           <Card
-            title={`Recovery item ${idx + 1} / ${Math.max(total, 1)}`}
+            title={`Recovery item ${idx + 1}`}
             subtitle={`Why this is here: ${currentReviewReason ?? "new mistake"} • Accuracy so far: ${accuracyPct}%`}
             right={<Pill text={currentReviewReason ?? "Review mode"} tone="accent" />}
             accent
+            prominence="prominent"
           >
-            <div className="text-base font-medium leading-relaxed whitespace-pre-line text-black">
+            <div className="text-lg font-medium leading-relaxed whitespace-pre-line text-[#0f172a]">
               {q.question_text}
             </div>
 
@@ -639,16 +685,16 @@ export default function ReviewPage() {
                 const correct = locked && q.correct_option.toUpperCase() === letter;
                 const wrongChosen = locked && chosen && !correct;
 
-                let cls = "border border-gray-200 bg-white";
-                if (chosen) cls = "border-[#004aad] bg-[#eef4ff]";
-                if (correct) cls = "border-green-600 bg-green-50";
-                if (wrongChosen) cls = "border-red-600 bg-red-50";
+                let cls = "border border-gray-200 bg-white shadow-sm";
+                if (chosen) cls = "border-[#0f1b33] bg-[#edf5ff] shadow-md";
+                if (correct) cls = "border-[#2a9b67] bg-[#edfcf3] shadow-md";
+                if (wrongChosen) cls = "border-[#d54768] bg-[#fff2f5] shadow-md";
 
                 return (
                   <button
                     key={letter}
                     onClick={() => pick(letter)}
-                    className={`w-full rounded-xl p-4 text-left ${cls}`}
+                    className={`w-full rounded-2xl p-4 text-left transition ${cls}`}
                     disabled={saving}
                   >
                     <div className="mb-1 text-xs font-semibold text-gray-500">{letter}</div>
@@ -659,7 +705,7 @@ export default function ReviewPage() {
             </div>
 
             {err && (
-              <div className="mt-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+              <div className="mt-5 rounded-xl border border-[#f5b8c4] bg-[#fff2f5] p-4 text-sm text-[#b02039]">
                 {err}
                 <div className="mt-3 grid gap-2">
                   <PrimaryButton onClick={retryRecord} disabled={saving}>
@@ -672,25 +718,25 @@ export default function ReviewPage() {
             <div className="mt-6 flex gap-3 items-start">
               {!locked ? (
                 <button
-                  className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
+                  className="w-full rounded-xl bg-[#0e1b34] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#1a2b4a] disabled:opacity-60 sm:w-auto"
                   onClick={submit}
                   disabled={!selected || saving}
                 >
-                  {saving ? "Saving…" : "Submit"}
+                  {saving ? "Saving…" : "Submit recovery answer"}
                 </button>
               ) : (
                 <button
-                  className="rounded-xl bg-[#004aad] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#003b88] disabled:opacity-60"
+                  className="w-full rounded-xl bg-[#0e1b34] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#1a2b4a] disabled:opacity-60 sm:w-auto"
                   onClick={nextOrFinish}
                   disabled={saving}
                 >
-                  {idx === total - 1 ? "Finish" : "Next"}
+                  {idx === total - 1 ? "Finish recovery block" : "Next recovery item"}
                 </button>
               )}
 
               {locked && feedback && (
-                <div className="flex-1 rounded-xl border border-gray-200 p-4">
-                  <div className={`font-semibold ${feedback.correct ? "text-green-700" : "text-red-700"}`}>
+                <div className={`flex-1 rounded-2xl border p-5 ${feedback.correct ? "border-[#9de0bb] bg-[#ebfdf2]" : "border-[#f5b8c4] bg-[#fff2f5]"}`}>
+                  <div className={`font-semibold ${feedback.correct ? "text-[#0f8a4e]" : "text-[#b02039]"}`}>
                     {feedback.correct ? "Recovered" : "Still unstable"}
                   </div>
 
@@ -731,56 +777,73 @@ export default function ReviewPage() {
 
       {!loading && !err && mode === "done" && (
         <div className="grid gap-4">
+          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
+            <div className="grid gap-4 p-5 sm:p-6 lg:grid-cols-[1.08fr_0.92fr]">
+              <div>
+                <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
+                  Recovery complete
+                </div>
+                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">{outcomePill.text} state</h2>
+                <p className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
+                  Debt reduced. Route the next move while these mistakes are still visible.
+                </p>
+                <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
+                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
+                    Reviewed: <span className="font-semibold text-white">{reviewAnalysis.reviewedCount}</span>
+                  </div>
+                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
+                    Accuracy: <span className="font-semibold text-white">{reviewAnalysis.accuracyPct}%</span>
+                  </div>
+                </div>
+              </div>
+              <div className="grid gap-3">
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Recovered / unstable</div>
+                  <div className="mt-2 text-3xl font-semibold tracking-tight text-white">
+                    {reviewAnalysis.correctCount} / {reviewAnalysis.incorrectCount}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Next move</div>
+                  <div className="mt-2 text-sm text-[#d2dbec]">
+                    {reviewAnalysis.outcome === "rebuild" && "Rebuild route: lesson first, then targeted practice."}
+                    {reviewAnalysis.outcome === "stabilize" && "Stabilize route: one focused practice set on failed topic."}
+                    {reviewAnalysis.outcome === "advance" && "Advance route: return to forward practice, keep review active."}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
           <Card
             title="Recovery session complete"
-            subtitle="Use the result to choose the exact next repair step."
+            subtitle="Debt reduced. Route the next move while the mistakes are still visible."
             right={<Pill text={outcomePill.text} tone={outcomePill.tone} />}
             accent
+            prominence="prominent"
           >
-            <div className="grid gap-4 sm:grid-cols-4">
-              <StatBox
-                label="Reviewed"
-                value={`${reviewAnalysis.reviewedCount}`}
-                hint="Items completed"
-              />
-              <StatBox
-                label="Correct"
-                value={`${reviewAnalysis.correctCount}`}
-                hint="Recovered items"
-                accent={reviewAnalysis.correctCount > 0}
-              />
-              <StatBox
-                label="Incorrect"
-                value={`${reviewAnalysis.incorrectCount}`}
-                hint="Still unstable"
-                accent={reviewAnalysis.incorrectCount > 0}
-              />
-              <StatBox
-                label="Accuracy"
-                value={`${reviewAnalysis.accuracyPct}%`}
-                hint="This review session"
-                accent={reviewAnalysis.accuracyPct >= 75}
-              />
-            </div>
-            <div className="mt-5 rounded-2xl border border-gray-200 bg-white p-5">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                Session interpretation
+            <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+              <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <StatBox label="Reviewed" value={`${reviewAnalysis.reviewedCount}`} hint="Items completed" />
+                  <StatBox label="Accuracy" value={`${reviewAnalysis.accuracyPct}%`} hint="This review block" accent={reviewAnalysis.accuracyPct >= 75} />
+                  <StatBox label="Recovered" value={`${reviewAnalysis.correctCount}`} hint="Correct recoveries" accent={reviewAnalysis.correctCount > 0} />
+                  <StatBox label="Still weak" value={`${reviewAnalysis.incorrectCount}`} hint="Needs more repair" accent={reviewAnalysis.incorrectCount > 0} />
+                </div>
               </div>
-              {reviewAnalysis.outcome === "rebuild" && (
-                <div className="mt-2 text-sm leading-relaxed text-gray-700">
-                  Recovery was weak. Do not just move on. A concept or trap pattern is still unstable and needs targeted repair.
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Next move</div>
+                <div className="mt-2 text-sm text-gray-700">
+                  {reviewAnalysis.outcome === "rebuild" && "Rebuild route: lesson first, then targeted practice."}
+                  {reviewAnalysis.outcome === "stabilize" && "Stabilize route: one focused practice set on failed topic."}
+                  {reviewAnalysis.outcome === "advance" && "Advance route: return to forward practice, keep review active."}
                 </div>
-              )}
-              {reviewAnalysis.outcome === "stabilize" && (
-                <div className="mt-2 text-sm leading-relaxed text-gray-700">
-                  Recovery was partial. You are close, but one topic still needs focused reinforcement before forward work becomes efficient.
+                <div className="mt-4 grid gap-3">
+                  <PrimaryButton href={repairPracticeHref}>Run targeted practice</PrimaryButton>
+                  <SecondaryButton href={repairLessonHref}>Open lesson</SecondaryButton>
                 </div>
-              )}
-              {reviewAnalysis.outcome === "advance" && (
-                <div className="mt-2 text-sm leading-relaxed text-gray-700">
-                  Recovery was clean enough. You can return to forward practice, but keep review active so relapse stays under control.
-                </div>
-              )}
+              </div>
             </div>
             {repairTopic && (
               <div className="mt-4 rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
@@ -796,10 +859,6 @@ export default function ReviewPage() {
                       {" "}({reviewAnalysis.primaryRepairTarget.correct}/{reviewAnalysis.primaryRepairTarget.total})
                     </>
                   )}
-                </div>
-                <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:max-w-2xl">
-                  <PrimaryButton href={repairPracticeHref}>Practice this topic</PrimaryButton>
-                  <SecondaryButton href={repairLessonHref}>Open lesson</SecondaryButton>
                 </div>
               </div>
             )}
@@ -884,11 +943,16 @@ export default function ReviewPage() {
               </div>
             )}
 
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              {historySessionId ? (
+                <PrimaryButton href={`/history?session=${encodeURIComponent(historySessionId)}`}>Reopen this result</PrimaryButton>
+              ) : (
+                <SecondaryButton href="/history">Open history</SecondaryButton>
+              )}
               <PrimaryButton onClick={loadDuePreview}>Check due again</PrimaryButton>
-              <SecondaryButton href={repairPracticeHref}>Targeted practice</SecondaryButton>
-              <SecondaryButton href="/skills">Open skills</SecondaryButton>
+              <SecondaryButton href="/review">Run another recovery block</SecondaryButton>
               <SecondaryButton href="/today">Back to Today</SecondaryButton>
+              <SecondaryButton href="/coach">Open coach</SecondaryButton>
             </div>
           </Card>
         </div>

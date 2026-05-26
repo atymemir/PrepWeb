@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { resolveLesson } from "@/app/lib/lessonResolver";
+import { mathLessonToolContext } from "@/app/lib/mathToolContext";
 
 export default function LessonPage({ params }: { params: { subskill: string } }) {
   const lesson = resolveLesson(params.subskill);
@@ -8,6 +9,7 @@ export default function LessonPage({ params }: { params: { subskill: string } })
   if (!lesson) {
     notFound();
   }
+  const toolContext = mathLessonToolContext(lesson);
 
   return (
     <main className="min-h-screen">
@@ -69,6 +71,34 @@ export default function LessonPage({ params }: { params: { subskill: string } })
             {lesson.miniExample.answer}
           </div>
         </div>
+
+        {toolContext && (
+          <div className="mt-4 rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
+            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
+              SAT math execution for this topic
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div className="rounded-xl border border-[#b7d2ff] bg-white p-3">
+                <div className="text-xs font-semibold text-[#004aad]">Formula now</div>
+                <div className="mt-1 text-sm font-semibold text-black">{toolContext.formula.name}</div>
+                <div className="mt-1 text-xs text-gray-700">{toolContext.formula.formula}</div>
+              </div>
+              <div className="rounded-xl border border-[#b7d2ff] bg-white p-3">
+                <div className="text-xs font-semibold text-[#004aad]">Calculator helps when</div>
+                <div className="mt-1 text-sm font-semibold text-black">{toolContext.calculatorTip.title}</div>
+                <div className="mt-1 text-xs text-gray-700">{toolContext.calculatorTip.quickRule}</div>
+              </div>
+              <div className="rounded-xl border border-[#b7d2ff] bg-white p-3">
+                <div className="text-xs font-semibold text-[#004aad]">Fast SAT move</div>
+                <div className="mt-1 text-sm text-gray-800">{toolContext.fastMove}</div>
+              </div>
+              <div className="rounded-xl border border-[#b7d2ff] bg-white p-3">
+                <div className="text-xs font-semibold text-[#004aad]">Algebra is faster when</div>
+                <div className="mt-1 text-sm text-gray-800">{toolContext.algebraFasterWhen}</div>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="mt-6 flex flex-wrap gap-3">
           <Link

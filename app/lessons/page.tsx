@@ -6,7 +6,7 @@ import Link from "next/link";
 import { getSupabase } from "../lib/supabase";
 import { LESSONS } from "../data/lessons";
 import { sortWeakest, type SkillRow } from "../lib/learningSignals";
-import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
+import { ActionDock, Card, LoopRail, PageHeader, PagePurpose, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
 
 type Lesson = {
   key: string;
@@ -104,6 +104,16 @@ export default function LessonsPage() {
         title="Lessons"
         subtitle="Concept repair layer. Read fast, then go straight into targeted practice."
         right={<Pill text={`${filteredLessons.length} visible`} />}
+      />
+      <LoopRail active="Lessons" next="Practice" note="Lessons should compress theory, then send you straight back into reps." />
+      <PagePurpose
+        purpose="Lessons repair concepts fast."
+        instruction={
+          recommendedLessons[0]
+            ? `Open ${recommendedLessons[0].title}, then immediately practice that exact skill.`
+            : "Pick one lesson, learn the trap pattern, then run a targeted block."
+        }
+        why="Reading without immediate reps creates weak retention."
       />
 
       {loading && (
@@ -232,6 +242,24 @@ export default function LessonsPage() {
             </div>
           </Card>
         </div>
+      )}
+      {!loading && !err && (
+        <ActionDock
+          title="Lesson execution"
+          note="One lesson + one targeted block is stronger than browsing multiple pages."
+          primary={{
+            label: recommendedLessons[0] ? "Open top recommended lesson" : "Open lesson library",
+            href: recommendedLessons[0]
+              ? `/lesson/${encodeURIComponent(recommendedLessons[0].key)}`
+              : "/lessons",
+          }}
+          secondary={{
+            label: recommendedLessons[0] ? "Practice that lesson" : "Start practice",
+            href: recommendedLessons[0]
+              ? `/practice?subject=${recommendedLessons[0].subject ?? "Reading"}&subskill=${encodeURIComponent(recommendedLessons[0].key)}`
+              : "/practice?subject=Reading",
+          }}
+        />
       )}
     </main>
   );

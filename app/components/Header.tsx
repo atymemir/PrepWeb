@@ -13,6 +13,7 @@ const navItems = [
   { href: "/skills", label: "Skills", match: "/skills" },
   { href: "/lessons", label: "Lessons", match: "/lessons" },
   { href: "/coach", label: "Coach", match: "/coach" },
+  { href: "/history", label: "History", match: "/history" },
   { href: "/leagues", label: "Community", match: "/leagues" },
 ];
 
@@ -24,17 +25,17 @@ function Wordmark({ compact = false }: { compact?: boolean }) {
   return (
     <span
       className={[
-        "inline-flex items-end font-extrabold text-[#004aad]",
+        "inline-flex items-end font-extrabold text-[#0e1b34]",
         compact ? "text-base" : "text-lg",
       ].join(" ")}
       style={{
-        fontFamily: "Montserrat, ui-sans-serif, system-ui, sans-serif",
-        letterSpacing: "-0.095em",
+        fontFamily: "Sora, Manrope, ui-sans-serif, system-ui, sans-serif",
+        letterSpacing: "-0.1em",
         lineHeight: 1,
       }}
     >
-      <span>alg</span>
-      <span className="relative inline-block text-[0.72em]" style={{ transform: "translateY(0.18em)" }}>
+      <span className="text-[#0e1b34]">alg</span>
+      <span className="relative inline-block text-[0.72em] text-[#004aad]" style={{ transform: "translateY(0.18em)" }}>
         a
       </span>
     </span>
@@ -116,21 +117,21 @@ export default function Header() {
       return (
         <div className="flex shrink-0 items-center gap-2">
           {statusLabel && streakLabel && (
-            <div className="hidden rounded-lg border border-[#c7dbff] bg-[#eef4ff] px-3 py-2 text-xs font-semibold text-[#004aad] xl:block">
+            <div className="hidden rounded-xl border border-[#b9d6ff] bg-[#eef5ff] px-3 py-2 text-xs font-semibold text-[#004aad] shadow-sm xl:block">
               {statusLabel} • {streakLabel}
             </div>
           )}
 
           <Link
             href="/profile"
-            className="hidden rounded-lg px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-50 hover:text-black sm:inline-flex"
+            className="hidden rounded-xl px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-100 hover:text-black sm:inline-flex"
           >
             Profile
           </Link>
 
           <Link
             href="/today"
-            className="inline-flex items-center justify-center rounded-lg border border-[#c7dbff] bg-[#eef4ff] px-3 py-2 text-sm font-semibold text-[#004aad] transition hover:bg-[#dfeeff]"
+            className="inline-flex items-center justify-center rounded-xl border border-[#0e1b34] bg-[#0e1b34] px-3 py-2 text-sm font-semibold text-white transition hover:bg-[#192948]"
           >
             Open app
           </Link>
@@ -142,7 +143,7 @@ export default function Header() {
       <div className="flex shrink-0 items-center gap-2">
         <Link
           href="/login"
-          className="inline-flex items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-black transition hover:bg-gray-50"
+          className="inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-black transition hover:bg-gray-50"
         >
           Sign in
         </Link>
@@ -151,10 +152,13 @@ export default function Header() {
   }, [hasSession, ready, statusLabel, streakLabel]);
 
   return (
-    <header className="sticky top-0 z-40 border-b border-gray-200/80 bg-white/95 backdrop-blur">
+    <header className="sticky top-0 z-40 border-b border-white/60 bg-[rgba(245,248,253,0.86)] backdrop-blur-xl">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-4 py-3">
         <div className="flex items-center gap-8">
-          <Link href="/" className="shrink-0">
+          <Link
+            href="/"
+            className="shrink-0 rounded-xl border border-white/80 bg-white/80 px-3 py-1.5 shadow-sm"
+          >
             <Wordmark compact />
           </Link>
 
@@ -167,10 +171,10 @@ export default function Header() {
                   key={item.href}
                   href={item.href}
                   className={[
-                    "rounded-lg px-3 py-2 text-sm font-semibold transition",
+                    "rounded-xl px-3 py-2 text-sm font-semibold transition",
                     active
-                      ? "border border-[#c7dbff] bg-[#eef4ff] text-[#004aad]"
-                      : "text-gray-600 hover:bg-gray-50 hover:text-black",
+                      ? "border border-[#0e1b34] bg-[#0e1b34] text-white shadow-sm"
+                      : "text-gray-600 hover:bg-white hover:text-black",
                   ].join(" ")}
                 >
                   {item.label}
@@ -183,8 +187,8 @@ export default function Header() {
         {rightAction}
       </div>
 
-      <div className="border-t border-gray-100 lg:hidden">
-        <div className="mx-auto flex max-w-6xl gap-2 overflow-x-auto px-4 py-2">
+      <div className="border-t border-gray-200/70 lg:hidden">
+        <div className="mx-auto flex max-w-6xl gap-2 overflow-x-auto px-4 py-2.5">
           {navItems.map((item) => {
             const active = isActivePath(pathname, item.match);
 
@@ -193,10 +197,10 @@ export default function Header() {
                 key={item.href}
                 href={item.href}
                 className={[
-                  "whitespace-nowrap rounded-lg px-3 py-2 text-sm font-semibold transition",
+                  "whitespace-nowrap rounded-xl px-3 py-2 text-sm font-semibold transition",
                   active
-                    ? "border border-[#c7dbff] bg-[#eef4ff] text-[#004aad]"
-                    : "text-gray-600 hover:bg-gray-50 hover:text-black",
+                    ? "border border-[#0e1b34] bg-[#0e1b34] text-white"
+                    : "border border-transparent bg-white/75 text-gray-600 hover:bg-white hover:text-black",
                 ].join(" ")}
               >
                 {item.label}
@@ -208,10 +212,10 @@ export default function Header() {
             <Link
               href="/profile"
               className={[
-                "whitespace-nowrap rounded-lg px-3 py-2 text-sm font-semibold transition",
+                "whitespace-nowrap rounded-xl px-3 py-2 text-sm font-semibold transition",
                 pathname.startsWith("/profile")
-                  ? "border border-[#c7dbff] bg-[#eef4ff] text-[#004aad]"
-                  : "text-gray-600 hover:bg-gray-50 hover:text-black",
+                  ? "border border-[#0e1b34] bg-[#0e1b34] text-white"
+                  : "border border-transparent bg-white/75 text-gray-600 hover:bg-white hover:text-black",
               ].join(" ")}
             >
               Profile

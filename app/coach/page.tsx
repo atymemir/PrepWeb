@@ -14,7 +14,7 @@ import {
   lowSignalRows,
   type SkillRow as SharedSkillRow,
 } from "../lib/learningSignals";
-import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import { ActionDock, Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Profile = {
   id: string;
@@ -336,8 +336,8 @@ export default function CoachPage() {
       setSkillsMath((mathRes.data ?? []) as SkillRow[]);
       setDueReviewCount(((dueRes.data ?? []) as Question[]).length);
       setLeaderboard((lbRes.data ?? []) as LeaderEntry[]);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load coach.");
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Failed to load coach.");
     } finally {
       setLoading(false);
     }
@@ -370,15 +370,26 @@ export default function CoachPage() {
         throw new Error(data?.error || "Failed to generate coach note.");
       }
       setAiCoach(data);
-    } catch (e: any) {
-      setAiError(e?.message || "Failed to generate coach note.");
+    } catch (e: unknown) {
+      setAiError(e instanceof Error ? e.message : "Failed to generate coach note.");
     } finally {
       setAiLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    let cancelled = false;
+
+    const run = async () => {
+      await Promise.resolve();
+      if (!cancelled) await load();
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -408,11 +419,53 @@ export default function CoachPage() {
       )}
 
       {!loading && !err && (
-        <div className="grid gap-4">
+        <div className="grid gap-5">
           <LoopRail
             active="Coach"
+            next={dueReviewCount > 0 ? "Review" : weakestOverall?.row ? "Practice" : "Practice"}
             note="Coach should interpret the loop, not replace it."
           />
+
+          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
+            <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.2fr_0.8fr]">
+              <div>
+                <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
+                  Strategist command
+                </div>
+                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">{nextAction.title}</h2>
+                <p className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
+                  {nextAction.description}
+                </p>
+                <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
+                  <Link
+                    href={nextAction.primaryHref}
+                    className="inline-flex items-center justify-center rounded-xl bg-white px-4 py-3 text-sm font-semibold text-[#0f1b33] transition hover:bg-[#ecf3ff]"
+                  >
+                    {nextAction.primaryLabel}
+                  </Link>
+                  <Link
+                    href={nextAction.secondaryHref}
+                    className="inline-flex items-center justify-center rounded-xl border border-[#506894] bg-white/5 px-4 py-3 text-sm font-semibold text-[#d7e3fb] transition hover:border-[#6f8ec7] hover:bg-white/10"
+                  >
+                    {nextAction.secondaryLabel}
+                  </Link>
+                </div>
+              </div>
+
+              <div className="grid gap-3">
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Due review</div>
+                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{dueReviewCount}</div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">Immediate recovery load</div>
+                </div>
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Stable weak areas</div>
+                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{stableWeakAreas.length}</div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">High-confidence weak signals</div>
+                </div>
+              </div>
+            </div>
+          </section>
 
           <Card
             title="Strategist note"
@@ -505,6 +558,7 @@ export default function CoachPage() {
               title="Best next action"
               subtitle="Do this before you start improvising."
               right={<Pill text="Now" tone="accent" />}
+              accent
             >
               <div className="text-lg font-semibold text-black">{nextAction.title}</div>
               <div className="mt-2 text-sm leading-relaxed text-gray-700">
@@ -517,7 +571,7 @@ export default function CoachPage() {
               </div>
             </Card>
 
-            <Card title="Context snapshot" subtitle="Supporting facts behind the recommendation.">
+            <Card title="Context snapshot" subtitle="Supporting facts behind the recommendation." accent>
               <div className="grid gap-4 sm:grid-cols-2">
                 <StatBox
                   label="Review due"
@@ -552,7 +606,7 @@ export default function CoachPage() {
               </div>
 
               {myLeague && (
-                <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
                   League snapshot: rank #{myLeague.rank} with {myLeague.points} weekly points.
                 </div>
               )}
@@ -637,6 +691,14 @@ export default function CoachPage() {
             </Card>
           </div>
         </div>
+      )}
+      {!loading && !err && (
+        <ActionDock
+          title="Strategist command"
+          note={nextAction.description}
+          primary={{ label: nextAction.primaryLabel, href: nextAction.primaryHref }}
+          secondary={{ label: nextAction.secondaryLabel, href: nextAction.secondaryHref }}
+        />
       )}
     </main>
   );

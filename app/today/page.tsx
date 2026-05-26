@@ -17,8 +17,7 @@ import {
   type EngagementStatus,
 } from "../lib/engagement";
 import { getDurableEngagementSnapshot } from "../lib/engagementDurable";
-import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
-import { IdentityStatusCard } from "../components/EngagementSystem";
+import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
 
 type Profile = {
   id: string;
@@ -113,33 +112,6 @@ export default function TodayPage() {
     if (!identity || identity.totalSessions === 0) return null;
     return Math.round((identity.completedSessions / identity.totalSessions) * 100);
   }, [identity]);
-
-  const dailyMission = useMemo(() => {
-    if (dueReviewCount > 0) {
-      return {
-        title: "Protect streak quality",
-        note: "Clear due review first so daily consistency reflects real recovery, not only new attempts.",
-        actionLabel: "Start review now",
-        actionHref: "/review",
-      };
-    }
-
-    if (weakestOverall?.row) {
-      return {
-        title: `Push ${weakestOverall.row.subskill}`,
-        note: "Run a focused block on your weakest current signal, then let review schedule the misses.",
-        actionLabel: "Target weak zone",
-        actionHref: weakestHref,
-      };
-    }
-
-    return {
-      title: "Start a clean block",
-      note: "Generate one fresh session today to keep identity momentum active.",
-      actionLabel: "Open practice",
-      actionHref: "/practice?subject=Reading",
-    };
-  }, [dueReviewCount, weakestOverall, weakestHref]);
 
   const priority = useMemo(() => {
     if (dueReviewCount > 0) {
@@ -300,198 +272,151 @@ export default function TodayPage() {
       )}
 
       {!loading && !err && (
-  <div className="grid gap-4">
-    <LoopRail
-      active={dueReviewCount > 0 ? "Review" : weakestOverall?.row ? "Practice" : "Practice"}
-      note={
-        dueReviewCount > 0
-          ? "Recovery comes before fresh volume."
-          : "Use today to generate signal, repair one weak zone, then let review catch misses."
-      }
-    />
-
-    {identity && identityStatus && (
-      <IdentityStatusCard
-        identity={identity}
-        status={identityStatus}
-        title="Daily identity"
-        subtitle={`${identityStatus.division.label} • Level ${identityStatus.level} • ${identity.streakDays}d streak`}
-        note="This layer tracks completion discipline, accuracy, and consistency across every practice and review block."
-      />
-    )}
-
-    {engagementNotice && (
-      <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
-        {engagementNotice}
-      </div>
-    )}
-
-    <Card
-      title="Daily mission"
-      subtitle="One clear return reason every day: protect streak quality, then move your weak zone."
-      right={<Pill text={dueReviewCount > 0 ? "Recovery pressure" : "Forward pressure"} tone="accent" />}
-      accent
-      prominence="prominent"
-    >
-      <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
-        <div className="label label-accent">Mission</div>
-        <div className="mt-2 text-2xl font-semibold tracking-tight text-black">{dailyMission.title}</div>
-        <div className="mt-3 text-sm leading-relaxed text-gray-700">{dailyMission.note}</div>
-
-        <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:max-w-2xl">
-          <PrimaryButton href={dailyMission.actionHref}>{dailyMission.actionLabel}</PrimaryButton>
-          <SecondaryButton href="/leagues">Open community pressure</SecondaryButton>
-        </div>
-
-        {identity && identityStatus && (
-          <div className="mt-5 grid gap-3 sm:grid-cols-3">
-            <div className="rounded-xl border border-gray-200 bg-white px-3 py-3 text-sm text-gray-700">
-              Streak guard: <span className="font-semibold text-black">{identity.streakDays}d</span>
-            </div>
-            <div className="rounded-xl border border-gray-200 bg-white px-3 py-3 text-sm text-gray-700">
-              Completion rate: <span className="font-semibold text-black">{completionRate ?? 0}%</span>
-            </div>
-            <div className="rounded-xl border border-gray-200 bg-white px-3 py-3 text-sm text-gray-700">
-              {identityStatus.nextDivision
-                ? `${pointsToNextDivision(identity)} XP to ${identityStatus.nextDivision.label}`
-                : "Top division reached"}
-            </div>
-          </div>
-        )}
-      </div>
-    </Card>
-
-    <Card
-      title="Today’s priority"
-      subtitle="One best next action for this session."
-      right={<Pill text={priority.pill} tone="accent" />}
-      accent
-    >
-      <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
-        <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
-          Priority
-        </div>
-        <div className="mt-2 text-2xl font-semibold tracking-tight text-black">
-          {priority.title}
-        </div>
-        <div className="mt-3 max-w-3xl text-sm leading-relaxed text-gray-700">
-          {priority.reason}
-        </div>
-
-        <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:max-w-2xl">
-          <PrimaryButton href={priority.ctaHref}>{priority.ctaLabel}</PrimaryButton>
-          <SecondaryButton href={priority.secondaryHref}>{priority.secondaryLabel}</SecondaryButton>
-        </div>
-      </div>
-    </Card>
-
-    <div className="grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
-      <Card
-        title="Recovery status"
-        subtitle="Spaced review protects against repeated mistakes."
-        right={
-          <Pill
-            text={dueReviewCount > 0 ? `${dueReviewCount} due` : "Clear"}
-            tone={dueReviewCount > 0 ? "accent" : "success"}
+        <div className="grid gap-5">
+          <LoopRail
+            active={dueReviewCount > 0 ? "Review" : "Practice"}
+            next={dueReviewCount > 0 ? "Review" : "Practice"}
+            note={dueReviewCount > 0 ? "Clear debt first, then push forward." : "Push forward, then let review catch misses."}
           />
-        }
-      >
-        <div className="text-sm leading-relaxed text-gray-700">
-          {dueReviewCount > 0
-            ? "Review is active. Clear due items now so mistakes do not stay live while you push forward."
-            : "Nothing is due right now. That means you are free to focus on fresh practice or targeted repair."}
-        </div>
 
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-          {dueReviewCount > 0 ? (
-            <PrimaryButton href="/review">Open review</PrimaryButton>
-          ) : (
-            <SecondaryButton href="/review">Check review</SecondaryButton>
+          {engagementNotice && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+              {engagementNotice}
+            </div>
           )}
-          <SecondaryButton href="/practice?subject=Reading">Start practice</SecondaryButton>
+
+          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
+            <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.2fr_0.8fr]">
+              <div>
+                <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
+                  Today mission
+                </div>
+                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">{priority.title}</h2>
+                <p className="mt-3 max-w-2xl text-sm leading-relaxed text-[#d2dbec]">{priority.reason}</p>
+
+                <div className="mt-6 grid gap-3 sm:max-w-xl sm:grid-cols-2">
+                  <Link
+                    href={priority.ctaHref}
+                    className="inline-flex items-center justify-center rounded-xl bg-white px-4 py-3 text-sm font-semibold text-[#0e1b34] transition hover:bg-[#ecf3ff]"
+                  >
+                    {priority.ctaLabel}
+                  </Link>
+                  <Link
+                    href={priority.secondaryHref}
+                    className="inline-flex items-center justify-center rounded-xl border border-[#4b628f] bg-white/5 px-4 py-3 text-sm font-semibold text-[#d7e3fb] transition hover:border-[#6f8ec7] hover:bg-white/10"
+                  >
+                    {priority.secondaryLabel}
+                  </Link>
+                </div>
+
+                <div className="mt-6 h-2.5 rounded-full bg-white/10">
+                  <div
+                    className={`h-full rounded-full ${dueReviewCount > 0 ? "bg-[#8fc1ff]" : "bg-white"}`}
+                    style={{ width: `${Math.max(14, Math.min(100, completionRate ?? 28))}%` }}
+                  />
+                </div>
+                <div className="mt-2 text-xs text-[#c4cfe4]">
+                  Session completion discipline: {completionRate ?? 0}%
+                </div>
+              </div>
+
+              <div className="grid gap-3">
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Recovery pressure</div>
+                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{dueReviewCount}</div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">{dueReviewCount > 0 ? "Due now" : "Queue clear"}</div>
+                </div>
+
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Consistency</div>
+                  <div className="mt-1 text-2xl font-semibold tracking-tight text-white">
+                    {identity ? `${identity.streakDays}d` : "—"}
+                  </div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">
+                    {identityStatus ? `${identityStatus.division.label} • L${identityStatus.level}` : "No status yet"}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Countdown</div>
+                  <div className="mt-1 text-2xl font-semibold tracking-tight text-white">{countdownText}</div>
+                  <div className="mt-1 text-xs text-[#c5d1e8]">SAT target window</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+            <Card
+              title="Weakest live zone"
+              subtitle="When review is clear, this is your highest-impact forward move."
+              right={
+                weakestOverall?.row ? (
+                  <Pill text={`${confidenceLabel(weakestOverall.row.attempts)} confidence`} tone="accent" />
+                ) : (
+                  <Pill text="No signal yet" />
+                )
+              }
+            >
+              {weakestOverall?.row ? (
+                <div className="grid gap-4">
+                  <div>
+                    <div className="text-xl font-semibold text-black">{weakestOverall.row.subskill}</div>
+                    <div className="mt-1 text-sm text-gray-700">
+                      {weakestOverall.subject} • {Math.round((weakestOverall.row.accuracy ?? 0) * 100)}% • n={weakestOverall.row.attempts}
+                    </div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <PrimaryButton href={weakestHref}>Practice weak zone</PrimaryButton>
+                    <SecondaryButton href={weakestLessonHref}>Open lesson</SecondaryButton>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid gap-4">
+                  <div className="text-sm text-gray-700">No stable weak-zone signal yet. Generate one fresh set.</div>
+                  <PrimaryButton href="/practice?subject=Reading">Generate signal</PrimaryButton>
+                </div>
+              )}
+            </Card>
+
+            <Card title="Session pulse" subtitle="What changed most recently." accent>
+              <div className="grid gap-3">
+                <div className="rounded-2xl border border-[#d4e5ff] bg-[#f3f8ff] p-4 text-sm text-gray-700">
+                  Last block:
+                  <span className="ml-1 font-semibold text-black">
+                    {identity?.lastSession ? `${identity.lastSession.correct}/${identity.lastSession.answered}` : "No completed block yet"}
+                  </span>
+                </div>
+                <div className="rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
+                  Weekly points: <span className="font-semibold text-black">{myWeeklyPoints !== null ? myWeeklyPoints : "—"}</span>
+                  <span className="mx-2 text-gray-300">•</span>
+                  Rank <span className="font-semibold text-black">{myRank ? `#${myRank}` : "—"}</span>
+                </div>
+                {identity && identityStatus?.nextDivision && (
+                  <div className="rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
+                    {pointsToNextDivision(identity)} XP to {identityStatus.nextDivision.label}
+                  </div>
+                )}
+              </div>
+            </Card>
+          </div>
+
+          <div className="flex flex-wrap gap-3 text-sm">
+            <Link className="inline-flex rounded-full border border-gray-300 bg-white px-3 py-2 font-semibold text-gray-700 hover:border-gray-400 hover:text-black" href="/review">
+              Open recovery queue
+            </Link>
+            <Link className="inline-flex rounded-full border border-gray-300 bg-white px-3 py-2 font-semibold text-gray-700 hover:border-gray-400 hover:text-black" href="/history">
+              Open history
+            </Link>
+            <Link className="inline-flex rounded-full border border-gray-300 bg-white px-3 py-2 font-semibold text-gray-700 hover:border-gray-400 hover:text-black" href="/skills">
+              Open skills map
+            </Link>
+            <Link className="inline-flex rounded-full border border-gray-300 bg-white px-3 py-2 font-semibold text-gray-700 hover:border-gray-400 hover:text-black" href="/profile">
+              Edit profile
+            </Link>
+          </div>
         </div>
-      </Card>
-
-      <Card
-        title="Weak zone"
-        subtitle="The weakest current signal across tracked subskills."
-        right={
-          weakestOverall?.row ? (
-            <Pill text={`${confidenceLabel(weakestOverall.row.attempts)} confidence`} tone="accent" />
-          ) : (
-            <Pill text="No signal yet" />
-          )
-        }
-      >
-        {weakestOverall?.row ? (
-          <>
-            <div className="text-lg font-semibold text-black">{weakestOverall.row.subskill}</div>
-            <div className="mt-1 text-sm text-gray-700">
-              {weakestOverall.subject} • {weakestOverall.row.domain} • {weakestOverall.row.skill}
-            </div>
-            <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
-              {Math.round((weakestOverall.row.accuracy ?? 0) * 100)}% accuracy over{" "}
-              {weakestOverall.row.attempts} attempts.
-            </div>
-
-            <div className="mt-5 grid gap-3 sm:grid-cols-2">
-              <PrimaryButton href={weakestHref}>Practice this</PrimaryButton>
-              <SecondaryButton href={weakestLessonHref}>Open lesson</SecondaryButton>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="text-sm text-gray-700">
-              You do not have enough data yet for reliable weak-zone ranking.
-            </div>
-            <div className="mt-5 grid gap-3">
-              <PrimaryButton href="/practice?subject=Reading">Generate signal</PrimaryButton>
-            </div>
-          </>
-        )}
-      </Card>
-    </div>
-
-    <Card title="Weekly snapshot" subtitle="Support metrics, not the main decision layer.">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatBox
-          label="Weekly points"
-          value={myWeeklyPoints !== null ? String(myWeeklyPoints) : "—"}
-          hint="Practice + review, weighted by accuracy"
-          accent
-        />
-        <StatBox
-          label="Global rank"
-          value={myRank ? `#${myRank}` : "—"}
-          hint="League position this week"
-        />
-        <StatBox
-          label="Review due"
-          value={String(dueReviewCount)}
-          hint="Current recovery pressure"
-          accent={dueReviewCount > 0}
-        />
-        <StatBox
-          label="Countdown"
-          value={countdownText}
-          hint="Based on your SAT date"
-        />
-      </div>
-
-      <div className="mt-5 flex flex-wrap gap-4 text-sm">
-        <Link className="underline text-gray-700 hover:text-black" href="/skills">
-          Open skills map
-        </Link>
-        <Link className="underline text-gray-700 hover:text-black" href="/lessons">
-          Open lessons
-        </Link>
-        <Link className="underline text-gray-700 hover:text-black" href="/profile">
-          Edit profile
-        </Link>
-      </div>
-    </Card>
-  </div>
-)}
+      )}
     </main>
   );
 }

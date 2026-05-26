@@ -4,9 +4,9 @@ import Header from "./components/Header";
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="bg-white text-black antialiased">
+      <body className="text-black antialiased">
         <Header />
-        <main className="mx-auto max-w-6xl px-4 pt-6 pb-10">
+        <main className="app-canvas mx-auto max-w-6xl px-4 pb-28 pt-5 md:pb-12 md:pt-7">
           {children}
         </main>
       </body>
