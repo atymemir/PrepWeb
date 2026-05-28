@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
 import { getSupabase } from "@/app/lib/supabase";
 import FloatingCoachDock from "./FloatingCoachDock";
+import SiteFooter from "./SiteFooter";
 
 const STUDY_PREFIXES = [
   "/today",
@@ -62,6 +63,7 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
       >
         {children}
       </main>
+      <SiteFooter />
       {studySurface && hasSession ? <FloatingCoachDock /> : null}
     </>
   );
