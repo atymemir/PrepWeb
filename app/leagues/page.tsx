@@ -12,6 +12,7 @@ import {
   type EngagementStatus,
 } from "../lib/engagement";
 import { getDurableEngagementSnapshot } from "../lib/engagementDurable";
+import { useStudentState } from "../lib/useStudentState";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 import { IdentityStatusCard } from "../components/EngagementSystem";
 
@@ -51,12 +52,16 @@ function leagueBand(rank: number | null) {
 
 export default function LeaguesPage() {
   const router = useRouter();
+  const { state: studentState } = useStudentState({ dueLimit: 80, historyLimit: 64 });
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [challengeCopied, setChallengeCopied] = useState(false);
   const [resultCopied, setResultCopied] = useState(false);
+  const [debtProofCopied, setDebtProofCopied] = useState(false);
+  const [improvementProofCopied, setImprovementProofCopied] = useState(false);
+  const [telegramCopied, setTelegramCopied] = useState(false);
 
   const [userId, setUserId] = useState<string>("");
   const [rows, setRows] = useState<Entry[]>([]);
@@ -187,6 +192,35 @@ export default function LeaguesPage() {
     });
   }, [identity, identityStatus, myRow]);
 
+  const debtProofText = useMemo(() => {
+    if (!studentState) return "Student state syncing. Finish one block to publish real debt-recovery proof.";
+    if (studentState.reviewDebt.dueCount === 0) {
+      return "I cleared my ALGA review debt to 0 today and moved back to focused SAT practice.";
+    }
+    return `I worked my recovery queue on ALGA and currently have ${studentState.reviewDebt.dueCount} due left. Keeping debt honest before new volume.`;
+  }, [studentState]);
+
+  const improvementProofText = useMemo(() => {
+    if (!studentState) return "Student state syncing. Run one comparable block to unlock topic-improvement proof text.";
+    const gain = studentState.recentMovement.biggestGain;
+    if (gain) {
+      return `I improved ${gain.topic} by +${gain.delta}% in my latest comparable SAT block on ALGA.`;
+    }
+    if (studentState.weakestSkill) {
+      return `Working on ${studentState.weakestSkill.subskill} (${studentState.weakestSkill.accuracyPct}% right now) and pushing a focused retry next.`;
+    }
+    return "I finished a focused ALGA SAT block and I am replaying the same shape to produce clean movement proof.";
+  }, [studentState]);
+
+  const telegramBridgeText = useMemo(() => {
+    return [
+      "ALGA Telegram weekly challenge:",
+      "1) Run one 12Q block",
+      "2) Clear review debt",
+      "3) Post your result screenshot and weakest-topic retry plan",
+    ].join(" ");
+  }, []);
+
   async function copyInvite() {
     const link =
       typeof window === "undefined"
@@ -220,6 +254,38 @@ export default function LeaguesPage() {
       window.setTimeout(() => setResultCopied(false), 1600);
     } catch {
       setResultCopied(false);
+    }
+  }
+
+  async function copyDebtProof() {
+    if (!debtProofText) return;
+    try {
+      await navigator.clipboard.writeText(debtProofText);
+      setDebtProofCopied(true);
+      window.setTimeout(() => setDebtProofCopied(false), 1600);
+    } catch {
+      setDebtProofCopied(false);
+    }
+  }
+
+  async function copyImprovementProof() {
+    if (!improvementProofText) return;
+    try {
+      await navigator.clipboard.writeText(improvementProofText);
+      setImprovementProofCopied(true);
+      window.setTimeout(() => setImprovementProofCopied(false), 1600);
+    } catch {
+      setImprovementProofCopied(false);
+    }
+  }
+
+  async function copyTelegramBridge() {
+    try {
+      await navigator.clipboard.writeText(telegramBridgeText);
+      setTelegramCopied(true);
+      window.setTimeout(() => setTelegramCopied(false), 1600);
+    } catch {
+      setTelegramCopied(false);
     }
   }
 
@@ -276,6 +342,94 @@ export default function LeaguesPage() {
               {engagementNotice}
             </div>
           )}
+
+          {studentState && (
+            <Card
+              title="Weekly climb command"
+              subtitle="Community amplifies the same student-state loop, not separate behavior."
+              right={<Pill text={`Debt ${studentState.reviewDebt.dueCount}`} tone={studentState.reviewDebt.dueCount > 0 ? "danger" : "success"} />}
+              accent
+            >
+              <div className="grid gap-3 lg:grid-cols-[1.15fr_0.85fr]">
+                <div className="rounded-xl border border-[#c7dbff] bg-[#f6faff] p-4">
+                  <div className="text-sm font-semibold text-black">{studentState.recommendedAction.title}</div>
+                  <div className="mt-2 text-sm text-gray-700">{studentState.recommendedAction.reason}</div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <PrimaryButton href={studentState.recommendedAction.primaryHref}>
+                      {studentState.recommendedAction.primaryLabel}
+                    </PrimaryButton>
+                    <SecondaryButton href={studentState.recommendedAction.secondaryHref}>
+                      {studentState.recommendedAction.secondaryLabel}
+                    </SecondaryButton>
+                  </div>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">What moves rank</div>
+                  <div className="mt-2 text-sm text-gray-700">
+                    Clear debt, then execute weakest-topic retry. Weekly rank follows real output, not passive leaderboard viewing.
+                  </div>
+                </div>
+              </div>
+            </Card>
+          )}
+
+          <Card
+            title="Study proof cards"
+            subtitle="Share concrete work proof: recovery, improvement, and session execution."
+            right={<Pill text="Proof first" tone="accent" />}
+          >
+            <div className="grid gap-3 lg:grid-cols-3">
+              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Debt proof</div>
+                <div className="mt-2 text-sm text-gray-700">{debtProofText}</div>
+                <div className="mt-3">
+                  <SecondaryButton onClick={copyDebtProof}>
+                    {debtProofCopied ? "Copied" : "Copy debt proof"}
+                  </SecondaryButton>
+                </div>
+              </div>
+              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Improvement proof</div>
+                <div className="mt-2 text-sm text-gray-700">{improvementProofText}</div>
+                <div className="mt-3">
+                  <SecondaryButton onClick={copyImprovementProof}>
+                    {improvementProofCopied ? "Copied" : "Copy improvement proof"}
+                  </SecondaryButton>
+                </div>
+              </div>
+              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Session result</div>
+                <div className="mt-2 text-sm text-gray-700">{resultText || "Finish one session to unlock result proof text."}</div>
+                <div className="mt-3">
+                  <SecondaryButton onClick={copyResult} disabled={!resultText}>
+                    {resultCopied ? "Copied" : "Copy result proof"}
+                  </SecondaryButton>
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          <Card
+            title="Telegram bridge"
+            subtitle="Light integration concept for real study groups without fake social mechanics."
+            right={<Pill text="Bridge" tone="accent" />}
+          >
+            <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
+              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Weekly challenge script</div>
+                <div className="mt-2">{telegramBridgeText}</div>
+              </div>
+              <div className="grid gap-3">
+                <PrimaryButton onClick={copyTelegramBridge}>
+                  {telegramCopied ? "Script copied" : "Copy Telegram script"}
+                </PrimaryButton>
+                <SecondaryButton onClick={copyInvite}>
+                  {copied ? "Invite copied" : "Copy invite link"}
+                </SecondaryButton>
+                <SecondaryButton href="/today">Back to mission</SecondaryButton>
+              </div>
+            </div>
+          </Card>
 
           <Card
             title="League pressure"

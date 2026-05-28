@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   SAT_CALCULATOR_STRATEGY,
   SAT_FORMULAS,
@@ -107,6 +107,16 @@ function pickTip(title: string): SatMathToolTip | null {
   return SAT_CALCULATOR_STRATEGY.find((tip) => tip.title === title) ?? null;
 }
 
+function desmosStarterExpressions(topicHint?: string | null): string[] {
+  const t = (topicHint || "").toLowerCase();
+  if (/(linear|system|slope|line|intercept)/.test(t)) return ["y = mx + b", "y = ax + c"];
+  if (/(quadratic|polynomial|parabola|roots?)/.test(t)) return ["y = ax^2 + bx + c", "y = 0"];
+  if (/(circle|radius)/.test(t)) return ["(x - h)^2 + (y - k)^2 = r^2"];
+  if (/(geometry|triangle|trig|angle)/.test(t)) return ["y = tan(theta)x", "x^2 + y^2 = r^2"];
+  if (/(percent|ratio|probability|data|statistics|rate)/.test(t)) return ["y = kx", "y = a(1 + r)^x"];
+  return ["y = f(x)", "y = g(x)"];
+}
+
 export default function MathToolsLayer({
   open,
   onClose,
@@ -116,6 +126,9 @@ export default function MathToolsLayer({
 }: MathToolsLayerProps) {
   const [tab, setTab] = useState<ToolTab>("topic");
   const preset = useMemo(() => topicPreset(topicHint), [topicHint]);
+  const [desmosExpressions, setDesmosExpressions] = useState<string[]>(() =>
+    desmosStarterExpressions(topicHint)
+  );
 
   const recommendedFormulas = useMemo(
     () => preset.formulaNames.map((name) => pickFormula(name)).filter(Boolean) as SatFormula[],
@@ -125,8 +138,28 @@ export default function MathToolsLayer({
     () => preset.tipTitles.map((title) => pickTip(title)).filter(Boolean) as SatMathToolTip[],
     [preset.tipTitles]
   );
+  const starterExpressions = useMemo(() => desmosStarterExpressions(topicHint), [topicHint]);
+  const desmosHref = "https://www.desmos.com/calculator";
+  const [copiedExpressions, setCopiedExpressions] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDesmosExpressions(starterExpressions);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [starterExpressions]);
 
   if (!open) return null;
+
+  async function copyExpressions() {
+    try {
+      await navigator.clipboard.writeText(desmosExpressions.join("\n"));
+      setCopiedExpressions(true);
+      window.setTimeout(() => setCopiedExpressions(false), 1400);
+    } catch {
+      setCopiedExpressions(false);
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50">
@@ -187,7 +220,7 @@ export default function MathToolsLayer({
                 Exam shell behavior
               </div>
               <div className="mt-2 text-sm text-gray-700">
-                Quick-reference only. Keep solving flow uninterrupted and return to the question.
+                Bluebook-style utility mode: quick checks only, then return to the active question.
               </div>
             </section>
           )}
@@ -279,20 +312,99 @@ export default function MathToolsLayer({
           )}
 
           {tab === "desmos" && (
-            <section className="rounded-2xl border border-dashed border-[#b7d2ff] bg-[#f6faff] p-4">
+            <section className="rounded-2xl border border-[#b7d2ff] bg-[#f6faff] p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
-                Desmos integration slot
+                Desmos graph workspace
               </div>
-              <div className="mt-2 text-sm font-semibold text-black">Future interactive graph panel</div>
-              <div className="mt-2 grid gap-2 text-sm text-gray-700">
-                <div className="rounded-lg border border-[#c7dbff] bg-white px-3 py-2">
-                  Planned: graph window + expression memory during practice/exam mode.
+              <div className="mt-2 text-sm font-semibold text-black">Set up the graph, then verify with a Bluebook-style calculator pass.</div>
+
+              <div className="mt-4 grid gap-3">
+                <div className="rounded-xl border border-[#c7dbff] bg-white p-3">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                    Topic starter
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {starterExpressions.map((expr) => (
+                      <button
+                        key={expr}
+                        onClick={() => setDesmosExpressions((prev) => [expr, ...prev.filter((item) => item !== expr)].slice(0, 4))}
+                        className="rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-white"
+                      >
+                        {expr}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="rounded-lg border border-[#c7dbff] bg-white px-3 py-2">
-                  Planned: one-tap handoff from question stem to graph setup pattern.
+
+                <div className="rounded-xl border border-[#c7dbff] bg-white p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                      Expression memory
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={copyExpressions}
+                        className="rounded-lg border border-gray-300 bg-white px-2 py-1 text-xs font-semibold text-gray-700"
+                      >
+                        {copiedExpressions ? "Copied" : "Copy"}
+                      </button>
+                      <button
+                        onClick={() => setDesmosExpressions(starterExpressions)}
+                        className="rounded-lg border border-gray-300 bg-white px-2 py-1 text-xs font-semibold text-gray-700"
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-2">
+                    {desmosExpressions.slice(0, 4).map((expr, index) => (
+                      <input
+                        key={index}
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-[#0f172a]"
+                        value={expr}
+                        onChange={(event) =>
+                          setDesmosExpressions((prev) =>
+                            prev.map((item, itemIndex) => (itemIndex === index ? event.target.value : item))
+                          )
+                        }
+                        aria-label={`Desmos expression ${index + 1}`}
+                      />
+                    ))}
+                  </div>
+                  <div className="mt-3 text-xs leading-relaxed text-gray-600">
+                    Copy expressions into the calculator below. Keep symbolic setup here so you do not lose the question.
+                  </div>
                 </div>
-                <div className="rounded-lg border border-[#c7dbff] bg-white px-3 py-2">
-                  Planned: solved-vs-unsolved reference snapshots without leaving session shell.
+
+                <div className="rounded-xl border border-[#c7dbff] bg-white p-3">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                    Utility actions
+                  </div>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    <a
+                      href={desmosHref}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                    >
+                      Open full Desmos
+                    </a>
+                    <button
+                      onClick={copyExpressions}
+                      className="inline-flex items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                    >
+                      {copiedExpressions ? "Expressions copied" : "Copy expressions"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="overflow-hidden rounded-xl border border-[#c7dbff] bg-white">
+                  <iframe
+                    title="Desmos graphing calculator"
+                    src="https://www.desmos.com/calculator?embed&showGrid=true&showXAxis=true&showYAxis=true"
+                    className="h-[420px] w-full"
+                    loading="lazy"
+                  />
                 </div>
               </div>
             </section>

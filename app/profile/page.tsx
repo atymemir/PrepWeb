@@ -12,6 +12,8 @@ import {
 } from "../lib/engagement";
 import { getDurableEngagementSnapshot } from "../lib/engagementDurable";
 import { normalizePlanTier, tierDefinition } from "../lib/productTiers";
+import { writeStudyFxPrefs } from "../lib/studyFxPrefs";
+import { useStudyFxPrefs } from "../lib/useStudyFxPrefs";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 import { IdentityStatusCard } from "../components/EngagementSystem";
 
@@ -61,6 +63,7 @@ function clampNumberString(v: string, min: number, max: number, fallback: number
 
 export default function ProfilePage() {
   const router = useRouter();
+  const fxPrefs = useStudyFxPrefs();
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -278,6 +281,49 @@ export default function ProfilePage() {
             </div>
 
             {/* Form */}
+            <div className="rounded-2xl border border-gray-200 bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                Study delight preferences
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <button
+                  onClick={() =>
+                    writeStudyFxPrefs({
+                      ...fxPrefs,
+                      soundEnabled: !fxPrefs.soundEnabled,
+                    })
+                  }
+                  className={[
+                    "rounded-xl border px-3 py-3 text-left text-sm font-semibold transition",
+                    fxPrefs.soundEnabled
+                      ? "border-[#b9d6ff] bg-[#eef5ff] text-[#0f1b33]"
+                      : "border-gray-300 bg-white text-gray-700 hover:border-gray-400",
+                  ].join(" ")}
+                >
+                  Session sounds {fxPrefs.soundEnabled ? "On" : "Off"}
+                </button>
+                <button
+                  onClick={() =>
+                    writeStudyFxPrefs({
+                      ...fxPrefs,
+                      motionEnabled: !fxPrefs.motionEnabled,
+                    })
+                  }
+                  className={[
+                    "rounded-xl border px-3 py-3 text-left text-sm font-semibold transition",
+                    fxPrefs.motionEnabled
+                      ? "border-[#b9d6ff] bg-[#eef5ff] text-[#0f1b33]"
+                      : "border-gray-300 bg-white text-gray-700 hover:border-gray-400",
+                  ].join(" ")}
+                >
+                  Celebration motion {fxPrefs.motionEnabled ? "On" : "Off"}
+                </button>
+              </div>
+              <div className="mt-2 text-xs text-gray-500">
+                Reduced-motion OS setting is still respected automatically.
+              </div>
+            </div>
+
             <div>
               <label className="text-sm font-semibold text-gray-700">Nickname</label>
               <input

@@ -15,6 +15,7 @@ import {
   lowSignalRows,
   type SkillRow as SharedSkillRow,
 } from "../lib/learningSignals";
+import { useStudentState } from "../lib/useStudentState";
 import { ActionDock, Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Profile = {
@@ -100,6 +101,7 @@ function coachHeadline(args: {
 
 export default function CoachPage() {
   const router = useRouter();
+  const { state: studentState } = useStudentState({ dueLimit: 80, historyLimit: 64 });
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -147,16 +149,18 @@ export default function CoachPage() {
     };
   }, [leaderboard, profile]);
 
+  const activeDueReviewCount = studentState?.reviewDebt.dueCount ?? dueReviewCount;
+
   const strategistNote = useMemo(() => {
     return coachHeadline({
-      dueReviewCount,
+      dueReviewCount: activeDueReviewCount,
       weakestOverall,
       dleft,
     });
-  }, [dueReviewCount, weakestOverall, dleft]);
+  }, [activeDueReviewCount, weakestOverall, dleft]);
 
   const nextAction = useMemo(() => {
-    if (dueReviewCount > 0) {
+    if (activeDueReviewCount > 0) {
       return {
         title: "Clear the recovery queue",
         description: "Review is due. Do not stack new questions on top of unresolved mistakes.",
@@ -193,13 +197,25 @@ export default function CoachPage() {
       secondaryHref: "/practice?subject=Math",
       secondaryLabel: "Start Math practice",
     };
-  }, [dueReviewCount, weakestOverall]);
+  }, [activeDueReviewCount, weakestOverall]);
+
+  const effectiveNextAction = useMemo(() => {
+    if (!studentState) return nextAction;
+    return {
+      title: studentState.recommendedAction.title,
+      description: `${studentState.recommendedAction.reason} ${studentState.recommendedAction.payoff}`,
+      primaryHref: studentState.recommendedAction.primaryHref,
+      primaryLabel: studentState.recommendedAction.primaryLabel,
+      secondaryHref: studentState.recommendedAction.secondaryHref,
+      secondaryLabel: studentState.recommendedAction.secondaryLabel,
+    };
+  }, [studentState, nextAction]);
 
   const coachSnapshot = useMemo(() => {
     return {
       nickname,
       examCountdownDays: dleft,
-      dueReviewCount,
+      dueReviewCount: activeDueReviewCount,
       weeklyRank: myLeague?.rank ?? null,
       weeklyPoints: myLeague?.points ?? null,
       stableWeakAreas: stableWeakAreas.map((row) => ({
@@ -211,12 +227,12 @@ export default function CoachPage() {
         accuracy: row.accuracy,
       })),
       lowSignalCount,
-      nextAction,
+      nextAction: effectiveNextAction,
     };
-  }, [nickname, dleft, dueReviewCount, myLeague, stableWeakAreas, lowSignalCount, nextAction, skillsReading]);
+  }, [nickname, dleft, activeDueReviewCount, myLeague, stableWeakAreas, lowSignalCount, effectiveNextAction, skillsReading]);
 
   const threeStepPlan = useMemo(() => {
-    if (dueReviewCount > 0 && weakestOverall?.row) {
+    if (activeDueReviewCount > 0 && weakestOverall?.row) {
       return [
         {
           step: "1",
@@ -295,7 +311,7 @@ export default function CoachPage() {
         label: "Open skills",
       },
     ];
-  }, [dueReviewCount, weakestOverall]);
+  }, [activeDueReviewCount, weakestOverall]);
 
   async function load() {
     setLoading(true);
@@ -450,7 +466,7 @@ export default function CoachPage() {
         <div className="grid gap-5">
           <LoopRail
             active="Coach"
-            next={dueReviewCount > 0 ? "Review" : weakestOverall?.row ? "Practice" : "Practice"}
+            next={activeDueReviewCount > 0 ? "Review" : weakestOverall?.row ? "Practice" : "Practice"}
             note="Coach should interpret the loop, not replace it."
           />
 
@@ -460,22 +476,22 @@ export default function CoachPage() {
                 <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
                   Strategist command
                 </div>
-                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">{nextAction.title}</h2>
+                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">{effectiveNextAction.title}</h2>
                 <p className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
-                  {nextAction.description}
+                  {effectiveNextAction.description}
                 </p>
                 <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
                   <Link
-                    href={nextAction.primaryHref}
+                    href={effectiveNextAction.primaryHref}
                     className="inline-flex items-center justify-center rounded-xl bg-white px-4 py-3 text-sm font-semibold text-[#0f1b33] transition hover:bg-[#ecf3ff]"
                   >
-                    {nextAction.primaryLabel}
+                    {effectiveNextAction.primaryLabel}
                   </Link>
                   <Link
-                    href={nextAction.secondaryHref}
+                    href={effectiveNextAction.secondaryHref}
                     className="inline-flex items-center justify-center rounded-xl border border-[#506894] bg-white/5 px-4 py-3 text-sm font-semibold text-[#d7e3fb] transition hover:border-[#6f8ec7] hover:bg-white/10"
                   >
-                    {nextAction.secondaryLabel}
+                    {effectiveNextAction.secondaryLabel}
                   </Link>
                 </div>
               </div>
@@ -483,7 +499,7 @@ export default function CoachPage() {
               <div className="grid gap-3">
                 <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
                   <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Due review</div>
-                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{dueReviewCount}</div>
+                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{activeDueReviewCount}</div>
                   <div className="mt-1 text-xs text-[#c5d1e8]">Immediate recovery load</div>
                 </div>
                 <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
@@ -501,6 +517,25 @@ export default function CoachPage() {
               </div>
             </div>
           </section>
+
+          {studentState && (
+            <Card title="Live guide layer" subtitle="Contextual nudges pulled from the same student state used across the app." right={<Pill text="Deterministic" tone="accent" />}>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {studentState.contextualMessages.coach.slice(0, 4).map((message) => (
+                  <div key={message.id} className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-700">
+                    {message.text}
+                    {message.actionHref && message.actionLabel && (
+                      <div className="mt-2">
+                        <Link href={message.actionHref} className="text-xs font-semibold text-[#004aad] underline">
+                          {message.actionLabel}
+                        </Link>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
 
           <Card
             title="Strategist note"
@@ -611,14 +646,14 @@ export default function CoachPage() {
               right={<Pill text="Now" tone="accent" />}
               accent
             >
-              <div className="text-lg font-semibold text-black">{nextAction.title}</div>
+              <div className="text-lg font-semibold text-black">{effectiveNextAction.title}</div>
               <div className="mt-2 text-sm leading-relaxed text-gray-700">
-                {nextAction.description}
+                {effectiveNextAction.description}
               </div>
 
               <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                <PrimaryButton href={nextAction.primaryHref}>{nextAction.primaryLabel}</PrimaryButton>
-                <SecondaryButton href={nextAction.secondaryHref}>{nextAction.secondaryLabel}</SecondaryButton>
+                <PrimaryButton href={effectiveNextAction.primaryHref}>{effectiveNextAction.primaryLabel}</PrimaryButton>
+                <SecondaryButton href={effectiveNextAction.secondaryHref}>{effectiveNextAction.secondaryLabel}</SecondaryButton>
               </div>
             </Card>
 
@@ -626,9 +661,9 @@ export default function CoachPage() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <StatBox
                   label="Review due"
-                  value={String(dueReviewCount)}
+                  value={String(activeDueReviewCount)}
                   hint="Recovery pressure"
-                  accent={dueReviewCount > 0}
+                  accent={activeDueReviewCount > 0}
                 />
                 <StatBox
                   label="Exam countdown"
@@ -754,9 +789,9 @@ export default function CoachPage() {
       {!loading && !err && (
         <ActionDock
           title="Strategist command"
-          note={nextAction.description}
-          primary={{ label: nextAction.primaryLabel, href: nextAction.primaryHref }}
-          secondary={{ label: nextAction.secondaryLabel, href: nextAction.secondaryHref }}
+          note={effectiveNextAction.description}
+          primary={{ label: effectiveNextAction.primaryLabel, href: effectiveNextAction.primaryHref }}
+          secondary={{ label: effectiveNextAction.secondaryLabel, href: effectiveNextAction.secondaryHref }}
         />
       )}
     </main>

@@ -4,22 +4,40 @@ export const dynamic = 'force-dynamic';
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { getSupabase } from "../lib/supabase";
-import { LESSONS } from "../data/lessons";
+import { LESSONS, type Lesson } from "../data/lessons";
+import { LESSON_ALIASES } from "../data/lessonAliases";
 import { sortWeakest, type SkillRow } from "../lib/learningSignals";
-import { ActionDock, Card, LoopRail, PageHeader, PagePurpose, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
+import { useStudentState } from "../lib/useStudentState";
+import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
 
-type Lesson = {
-  key: string;
-  subject?: "Reading" | "Math";
-  domain?: string;
-  title: string;
-  summary: string;
-  keyPoints: string[];
-  commonTraps: string[];
-  miniExample: { prompt: string; answer: string };
-};
+function normalize(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/[^\w\s]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function lessonHref(key: string): string {
+  return `/lesson/${encodeURIComponent(key)}`;
+}
+
+function practiceHref(lesson: Lesson): string {
+  return `/practice?subject=${lesson.subject}&subskill=${encodeURIComponent(lesson.key)}&revisit=1`;
+}
+
+function lessonForSkill(skill: string): Lesson | null {
+  const direct = LESSONS.find((lesson) => normalize(lesson.key) === normalize(skill));
+  if (direct) return direct;
+
+  const alias = LESSON_ALIASES[normalize(skill)];
+  if (!alias) return null;
+  return LESSONS.find((lesson) => normalize(lesson.key) === normalize(alias)) ?? null;
+}
 
 export default function LessonsPage() {
+  const { state: studentState } = useStudentState({ dueLimit: 80, historyLimit: 60 });
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [subject, setSubject] = useState<"All" | "Reading" | "Math">("All");
@@ -54,9 +72,9 @@ export default function LessonsPage() {
         ...((mathRes.data ?? []) as SkillRow[]),
       ];
 
-      setWeakSkills(sortWeakest(rows).slice(0, 4));
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load lesson recommendations.");
+      setWeakSkills(sortWeakest(rows).slice(0, 6));
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Failed to load lesson recommendations.");
       setWeakSkills([]);
     } finally {
       setLoading(false);
@@ -64,13 +82,19 @@ export default function LessonsPage() {
   }
 
   useEffect(() => {
-    loadWeakRecommendations();
+    let cancelled = false;
+    const run = async () => {
+      await Promise.resolve();
+      if (!cancelled) await loadWeakRecommendations();
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const lessons = LESSONS as Lesson[];
-
   const filteredLessons = useMemo(() => {
-    return lessons.filter((lesson) => {
+    return LESSONS.filter((lesson) => {
       const subjectOk = subject === "All" || lesson.subject === subject;
       const q = query.trim().toLowerCase();
 
@@ -79,51 +103,66 @@ export default function LessonsPage() {
       const haystack = [
         lesson.key,
         lesson.title,
-        lesson.subject ?? "",
-        lesson.domain ?? "",
-        lesson.summary ?? "",
-        ...(lesson.keyPoints ?? []),
-        ...(lesson.commonTraps ?? []),
+        lesson.subject,
+        lesson.domain,
+        lesson.summary,
+        lesson.practiceCue,
+        ...lesson.repairPattern,
+        ...lesson.commonTraps,
       ]
         .join(" ")
         .toLowerCase();
 
       return subjectOk && haystack.includes(q);
     });
-  }, [lessons, query, subject]);
+  }, [query, subject]);
 
-  const recommendedLessons = useMemo(() => {
-    if (!weakSkills.length) return [];
-    const weakNames = new Set(weakSkills.map((s) => s.subskill.toLowerCase()));
-    return lessons.filter((lesson) => weakNames.has(lesson.key.toLowerCase())).slice(0, 4);
-  }, [lessons, weakSkills]);
+  const recommendedRoutes = useMemo(() => {
+    const seen = new Set<string>();
+    return weakSkills
+      .map((skill) => {
+        const lesson = lessonForSkill(skill.subskill);
+        if (!lesson || seen.has(lesson.key)) return null;
+        seen.add(lesson.key);
+        return {
+          skill,
+          lesson,
+          accuracyPct: Math.round((skill.accuracy ?? 0) * 100),
+        };
+      })
+      .filter((item): item is { skill: SkillRow; lesson: Lesson; accuracyPct: number } => !!item)
+      .slice(0, 3);
+  }, [weakSkills]);
+
+  const primaryLesson = recommendedRoutes[0]?.lesson ?? filteredLessons[0] ?? LESSONS[0];
 
   return (
     <main className="min-h-screen">
       <PageHeader
         title="Lessons"
-        subtitle="Concept repair layer. Read fast, then go straight into targeted practice."
-        right={<Pill text={`${filteredLessons.length} visible`} />}
-      />
-      <LoopRail active="Lessons" next="Practice" note="Lessons should compress theory, then send you straight back into reps." />
-      <PagePurpose
-        purpose="Lessons repair concepts fast."
-        instruction={
-          recommendedLessons[0]
-            ? `Open ${recommendedLessons[0].title}, then immediately practice that exact skill.`
-            : "Pick one lesson, learn the trap pattern, then run a targeted block."
-        }
-        why="Reading without immediate reps creates weak retention."
+        subtitle="Open one repair playbook, then verify with focused reps."
+        right={<Pill text={`${filteredLessons.length} lessons`} tone="accent" />}
       />
 
+      {studentState && (
+        <section className="mb-4 rounded-2xl border border-gray-200 bg-white/92 p-4 shadow-sm sm:mb-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">Lesson usage command</div>
+            <Pill text={`Debt ${studentState.reviewDebt.dueCount}`} tone={studentState.reviewDebt.dueCount > 0 ? "danger" : "success"} />
+          </div>
+          <div className="mt-2 text-sm font-semibold text-black">{studentState.recommendedAction.title}</div>
+          <div className="mt-1 text-xs text-gray-600">Use lesson to repair, then return to targeted retry immediately.</div>
+        </section>
+      )}
+
       {loading && (
-        <Card title="Loading…" subtitle="Building lesson recommendations">
+        <Card title="Loading…" subtitle="Building repair routes">
           <div className="text-sm text-gray-600">Please wait.</div>
         </Card>
       )}
 
       {!loading && err && (
-        <Card title="Error" subtitle="Lesson recommendations could not load">
+        <Card title="Error" subtitle="Lessons could not load">
           <div className="text-sm text-red-600">{err}</div>
           <div className="mt-4 grid gap-3">
             <PrimaryButton onClick={loadWeakRecommendations}>Try again</PrimaryButton>
@@ -134,58 +173,55 @@ export default function LessonsPage() {
 
       {!loading && !err && (
         <div className="grid gap-4">
-          {/* Recommended */}
-          <Card
-            title="Recommended from your weak skills"
-            subtitle="Best theory review based on your current weak zones."
-          >
-            {recommendedLessons.length > 0 ? (
-              <div className="grid gap-3 md:grid-cols-2">
-                {recommendedLessons.map((lesson) => (
+          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] shadow-xl">
+            <div className="p-5 sm:p-6">
+              <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
+                Top repair route
+              </div>
+              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+                {primaryLesson.title}
+              </h2>
+              <p className="mt-3 max-w-2xl text-sm leading-relaxed text-[#d2dbec]">
+                {primaryLesson.summary}
+              </p>
+              <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
+                <PrimaryButton href={lessonHref(primaryLesson.key)}>Open lesson</PrimaryButton>
+                <SecondaryButton href={practiceHref(primaryLesson)}>Run focused retry</SecondaryButton>
+              </div>
+            </div>
+          </section>
+
+          {recommendedRoutes.length > 0 && (
+            <section className="rounded-2xl border border-gray-200 bg-white/92 p-3 shadow-sm">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">Weakest-first routes</div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                {recommendedRoutes.map(({ lesson, accuracyPct }) => (
                   <Link
                     key={lesson.key}
-                    href={`/lesson/${encodeURIComponent(lesson.key)}`}
-                    className="rounded-2xl border border-gray-200 p-4 transition hover:bg-gray-50"
+                    href={lessonHref(lesson.key)}
+                    className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700 hover:border-gray-300"
                   >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-semibold text-black">{lesson.title}</div>
-                      {lesson.subject ? <Pill text={lesson.subject} /> : null}
-                    </div>
-                    <div className="mt-2 text-sm leading-relaxed text-gray-600">
-                      {lesson.summary}
-                    </div>
-                    <div className="mt-3 text-xs text-gray-500">
-                      Open lesson → then go straight into targeted practice.
-                    </div>
+                    <div className="font-semibold text-black">{lesson.title}</div>
+                    <div className="mt-1 text-xs text-gray-600">{lesson.subject} • {accuracyPct}%</div>
                   </Link>
                 ))}
               </div>
-            ) : (
-              <div>
-                <div className="text-sm text-gray-700">
-                  No personalized recommendations yet. Once ALGA has enough practice data, this section becomes more useful.
-                </div>
-                <div className="mt-4 grid gap-3">
-                  <PrimaryButton href="/practice?subject=Reading">Start practice</PrimaryButton>
-                  <SecondaryButton href="/skills">Open skills</SecondaryButton>
-                </div>
-              </div>
-            )}
-          </Card>
+            </section>
+          )}
 
-          {/* Filters */}
-          <Card title="Lesson library" subtitle="Search concepts, then repair and practice.">
-            <div className="flex flex-col gap-4">
+          <section className="rounded-3xl border border-gray-200 bg-white/92 p-4 shadow-sm sm:p-5">
+            <div className="grid gap-3 md:grid-cols-[auto_1fr] md:items-center">
               <div className="flex flex-wrap gap-2">
                 {(["All", "Reading", "Math"] as const).map((s) => (
                   <button
                     key={s}
                     onClick={() => setSubject(s)}
-                    className={`rounded-lg border px-3 py-2 text-sm font-semibold ${
+                    className={[
+                      "rounded-full border px-3 py-2 text-xs font-semibold transition",
                       subject === s
-                        ? "border-black bg-black text-white"
-                        : "border-gray-300 bg-white text-gray-700"
-                    }`}
+                        ? "border-[#0e1b34] bg-[#0e1b34] text-white"
+                        : "border-gray-300 bg-white text-gray-700 hover:border-gray-400",
+                    ].join(" ")}
                   >
                     {s}
                   </button>
@@ -193,73 +229,42 @@ export default function LessonsPage() {
               </div>
 
               <input
-                className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none focus:border-black"
-                placeholder="Search lesson / subskill / domain…"
+                className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm outline-none"
+                placeholder="Search lesson"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
               />
+            </div>
 
+            <div className="mt-4 grid gap-3">
               {filteredLessons.length === 0 ? (
-                <div className="text-sm text-gray-600">
-                  No lessons match “{query.trim()}”.
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+                  No lessons match &quot;{query.trim()}&quot;.
                 </div>
               ) : (
-                <div className="grid gap-3">
-                  {filteredLessons.map((lesson) => (
-                    <div
-                      key={lesson.key}
-                      className="rounded-2xl border border-gray-200 p-4"
-                    >
-                      <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <div className="text-base font-semibold text-black">{lesson.title}</div>
-                          <div className="mt-1 flex flex-wrap gap-2">
-                            {lesson.subject ? <Pill text={lesson.subject} /> : null}
-                            {lesson.domain ? <Pill text={lesson.domain} /> : null}
-                          </div>
-                          <div className="mt-3 text-sm leading-relaxed text-gray-600">
-                            {lesson.summary}
-                          </div>
-                        </div>
+                filteredLessons.map((lesson) => (
+                  <div
+                    key={lesson.key}
+                    className="grid gap-3 rounded-2xl border border-gray-200 bg-white p-4 lg:grid-cols-[1fr_auto] lg:items-center"
+                  >
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-base font-semibold text-black">{lesson.title}</div>
+                        <Pill text={lesson.subject} tone={lesson.subject === "Math" ? "accent" : "neutral"} />
                       </div>
-
-                      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                        <PrimaryButton href={`/lesson/${encodeURIComponent(lesson.key)}`}>
-                          Open lesson
-                        </PrimaryButton>
-                        <SecondaryButton
-                          href={`/practice?subject=${lesson.subject ?? "Reading"}&subskill=${encodeURIComponent(
-                            lesson.key
-                          )}`}
-                        >
-                          Practice this
-                        </SecondaryButton>
-                      </div>
+                      <div className="mt-1 text-sm text-gray-700">{lesson.summary}</div>
                     </div>
-                  ))}
-                </div>
+
+                    <div className="grid gap-2 sm:grid-cols-2 lg:w-56 lg:grid-cols-1">
+                      <PrimaryButton href={lessonHref(lesson.key)}>Open</PrimaryButton>
+                      <SecondaryButton href={practiceHref(lesson)}>Retry</SecondaryButton>
+                    </div>
+                  </div>
+                ))
               )}
             </div>
-          </Card>
+          </section>
         </div>
-      )}
-      {!loading && !err && (
-        <ActionDock
-          title="Lesson execution"
-          note="One lesson + one targeted block is stronger than browsing multiple pages."
-          primary={{
-            label: recommendedLessons[0] ? "Open top recommended lesson" : "Open lesson library",
-            href: recommendedLessons[0]
-              ? `/lesson/${encodeURIComponent(recommendedLessons[0].key)}`
-              : "/lessons",
-          }}
-          secondary={{
-            label: recommendedLessons[0] ? "Practice that lesson" : "Start practice",
-            href: recommendedLessons[0]
-              ? `/practice?subject=${recommendedLessons[0].subject ?? "Reading"}&subskill=${encodeURIComponent(recommendedLessons[0].key)}`
-              : "/practice?subject=Reading",
-          }}
-        />
       )}
     </main>
   );

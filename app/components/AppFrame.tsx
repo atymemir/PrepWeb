@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
 import { getSupabase } from "@/app/lib/supabase";
-import BottomNav from "./BottomNav";
+import FloatingCoachDock from "./FloatingCoachDock";
 
 const STUDY_PREFIXES = [
   "/today",
@@ -62,7 +62,7 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
       >
         {children}
       </main>
-      {studySurface && hasSession ? <BottomNav /> : null}
+      {studySurface && hasSession ? <FloatingCoachDock /> : null}
     </>
   );
 }

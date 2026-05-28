@@ -23,6 +23,7 @@ import {
   type MasteryState,
   type MovementState,
 } from "../lib/mastery";
+import { useStudentState } from "../lib/useStudentState";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Row = SharedSkillRow;
@@ -64,6 +65,7 @@ function sortForExecution(rows: DecoratedRow[]): DecoratedRow[] {
 
 export default function SkillsPage() {
   const router = useRouter();
+  const { state: studentState } = useStudentState({ dueLimit: 80, historyLimit: 64 });
 
   const [subject, setSubject] = useState<"Math" | "Reading">("Reading");
   const [rows, setRows] = useState<Row[]>([]);
@@ -102,6 +104,7 @@ export default function SkillsPage() {
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
     setFocusKey(null);
     setStateFilter("Unstable");
@@ -130,6 +133,7 @@ export default function SkillsPage() {
     if (stateFilter !== "Unstable") return;
     if (stateCounts.Unstable > 0) return;
     if (stateCounts.Growing > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setStateFilter("Growing");
       return;
     }
@@ -204,6 +208,27 @@ export default function SkillsPage() {
         next={missionNext}
         note="Use this page as a precision selector, not as a report."
       />
+
+      {studentState && (
+        <section className="mb-4 rounded-2xl border border-gray-200 bg-white/92 p-4 shadow-sm sm:mb-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
+              Unified command
+            </div>
+            <Pill text={`Debt ${studentState.reviewDebt.dueCount}`} tone={studentState.reviewDebt.dueCount > 0 ? "danger" : "success"} />
+          </div>
+          <div className="mt-2 text-sm font-semibold text-black">{studentState.recommendedAction.title}</div>
+          <div className="mt-1 text-xs text-gray-600">{studentState.recommendedAction.reason}</div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:max-w-xl">
+            <SecondaryButton href={studentState.recommendedAction.primaryHref}>
+              {studentState.recommendedAction.primaryLabel}
+            </SecondaryButton>
+            <SecondaryButton href={studentState.recommendedAction.secondaryHref}>
+              {studentState.recommendedAction.secondaryLabel}
+            </SecondaryButton>
+          </div>
+        </section>
+      )}
 
       {loading && (
         <Card title="Loading…" subtitle="Pulling your mastery map">

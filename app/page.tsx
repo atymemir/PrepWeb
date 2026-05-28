@@ -88,6 +88,13 @@ export default function HomePage() {
               </Link>
 
               <Link
+                href="/how-it-works"
+                className="inline-flex items-center justify-center rounded-xl border border-[#5a719f] bg-white/5 px-5 py-3 text-sm font-semibold text-[#d8e4fb] transition hover:border-[#7d9acf] hover:bg-white/10"
+              >
+                How it works
+              </Link>
+
+              <Link
                 href="/today"
                 className="inline-flex items-center justify-center rounded-xl border border-[#5a719f] bg-white/5 px-5 py-3 text-sm font-semibold text-[#d8e4fb] transition hover:border-[#7d9acf] hover:bg-white/10"
               >
@@ -123,6 +130,20 @@ export default function HomePage() {
           <LoopCard step="Step 1" title="Run one practice block" note="Start with 12 questions to generate real signal." />
           <LoopCard step="Step 2" title="Clear review debt" note="Recover misses before stacking new volume." />
           <LoopCard step="Step 3" title="Route targeted repair" note="Use skills/history to focus one weak subtopic next." />
+        </div>
+        <div className="mt-5 grid gap-3 sm:max-w-md sm:grid-cols-2">
+          <Link
+            href="/login?next=/welcome"
+            className="inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-[#0f172a] transition hover:bg-gray-50"
+          >
+            New user onboarding
+          </Link>
+          <Link
+            href="/how-it-works"
+            className="inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-[#0f172a] transition hover:bg-gray-50"
+          >
+            Product model
+          </Link>
         </div>
       </section>
 

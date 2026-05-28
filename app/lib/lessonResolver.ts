@@ -1,22 +1,13 @@
-import { LESSONS } from "@/app/data/lessons";
+import { LESSONS, type Lesson } from "@/app/data/lessons";
 import { LESSON_ALIASES } from "@/app/data/lessonAliases";
-
-type Lesson = {
-  key: string;
-  subject?: "Reading" | "Math";
-  domain?: string;
-  title: string;
-  summary: string;
-  keyPoints: string[];
-  commonTraps: string[];
-  miniExample: { prompt: string; answer: string };
-};
 
 function normalize(value: string): string {
   return decodeURIComponent(String(value))
     .trim()
     .toLowerCase()
     .replace(/%20/g, " ")
+    .replace(/\bsat\b/g, " ")
+    .replace(/\bmodule\s*\d+\b/g, " ")
     .replace(/[_-]+/g, " ")
     .replace(/[^\w\s]/g, "")
     .replace(/\s+/g, " ");

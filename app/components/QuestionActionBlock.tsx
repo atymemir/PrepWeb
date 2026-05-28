@@ -1,5 +1,6 @@
 'use client';
 
+import Link from "next/link";
 import ReportQuestion from "./ReportQuestion";
 import type { AiExplanation } from "../lib/questionExplanation";
 
@@ -29,6 +30,11 @@ export default function QuestionActionBlock({
   footerNote?: string;
 }) {
   const reportSource = mode === "practice" ? "PracticeWeb" : "ReviewWeb";
+  const subjectParam = subject === "Math" ? "Math" : "Reading";
+  const lessonHref = subskill ? `/lesson/${encodeURIComponent(subskill)}` : null;
+  const retryHref = subskill
+    ? `/practice?subject=${subjectParam}&subskill=${encodeURIComponent(subskill)}&revisit=1`
+    : `/practice?subject=${subjectParam}`;
 
   return (
     <>
@@ -38,17 +44,31 @@ export default function QuestionActionBlock({
         </div>
       )}
 
-      <div className="mt-4 flex flex-wrap gap-3">
+      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+        {lessonHref && (
+          <Link
+            href={lessonHref}
+            className="inline-flex items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-[#0f172a] transition hover:border-gray-400 hover:bg-gray-50"
+          >
+            Repair lesson
+          </Link>
+        )}
+        <Link
+          href={retryHref}
+          className="inline-flex items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-[#0f172a] transition hover:border-gray-400 hover:bg-gray-50"
+        >
+          Focused retry
+        </Link>
         <button
           onClick={onExplain}
           disabled={aiExplainLoading}
-          className="rounded-lg border border-[#c7dbff] bg-[#eef4ff] px-3 py-2 text-sm font-semibold text-[#004aad] transition hover:bg-[#dfeeff] disabled:opacity-60"
+          className="inline-flex items-center justify-center rounded-lg border border-[#c7dbff] bg-[#eef4ff] px-3 py-2 text-sm font-semibold text-[#004aad] transition hover:bg-[#dfeeff] disabled:opacity-60"
         >
           {aiExplainLoading
-            ? "Generating AI explanation..."
+            ? "Generating..."
             : aiExplain
-            ? "Refresh AI explanation"
-            : "Explain with AI"}
+            ? "Refresh AI"
+            : "Explain"}
         </button>
       </div>
 

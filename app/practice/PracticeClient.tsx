@@ -34,10 +34,18 @@ import {
   type MovementState,
 } from "../lib/mastery";
 import { normalizePlanTier, tierDefinition, type PlanTier } from "../lib/productTiers";
+import { useStudentState } from "../lib/useStudentState";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 import QuestionActionBlock from "../components/QuestionActionBlock";
 import { SessionPayoffCard } from "../components/EngagementSystem";
 import MathToolsLayer from "../components/MathToolsLayer";
+import StudyFeedbackFX from "../components/StudyFeedbackFX";
+import TestingToolsDock from "../components/TestingToolsDock";
+import ExamFormulaReferenceSheet from "../components/ExamFormulaReferenceSheet";
+import FloatingDesmosCalculator, {
+  type DesktopWindowRect,
+  type DesmosSessionState,
+} from "../components/FloatingDesmosCalculator";
 
 type Question = {
   id: string;
@@ -65,6 +73,17 @@ type AnswerInsert = {
 
 type Mode = "setup" | "in_session" | "done";
 type PracticeMode = "trainer" | "timed" | "exam";
+type ToolProfile = "learning" | "testing";
+type OptionLetter = "A" | "B" | "C" | "D";
+
+type EliminatedOptionsByQuestion = Record<string, Partial<Record<OptionLetter, boolean>>>;
+
+type ExamToolsUiState = {
+  calculatorOpen: boolean;
+  calculatorMinimized: boolean;
+  referenceOpen: boolean;
+  desktopRect: DesktopWindowRect;
+};
 
 type ScoreBand = {
   low: number;
@@ -104,6 +123,13 @@ const PRACTICE_MODES: Array<{ key: PracticeMode; label: string; note: string }> 
     note: "Strict block simulation. No feedback until the end.",
   },
 ];
+
+const DEFAULT_EXAM_CALCULATOR_RECT: DesktopWindowRect = {
+  x: 56,
+  y: 106,
+  width: 540,
+  height: 430,
+};
 
 function createClientSessionId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -193,6 +219,8 @@ function isPracticePoolRpcUnavailable(error: { code?: string; message?: string }
   const msg = String(error?.message || "").toLowerCase();
   return (
     error?.code === "PGRST202" ||
+    msg.includes("get_practice_questions_fresh") ||
+    msg.includes("get_practice_questions_revisit") ||
     msg.includes("get_my_seen_practice_questions") ||
     msg.includes("practice_fresh_seen")
   );
@@ -201,6 +229,10 @@ function isPracticePoolRpcUnavailable(error: { code?: string; message?: string }
 export default function PracticeClient() {
   const router = useRouter();
   const sp = useSearchParams();
+  const { state: studentState, refresh: refreshStudentState } = useStudentState({
+    dueLimit: 80,
+    historyLimit: 64,
+  });
 
   const subject = (sp.get("subject") || "Reading") as "Reading" | "Math" | "Combined";
   const subskill = sp.get("subskill") || "";
@@ -239,6 +271,15 @@ export default function PracticeClient() {
   const [timingNotice, setTimingNotice] = useState<string | null>(null);
   const [poolNotice, setPoolNotice] = useState<string | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [examToolsUi, setExamToolsUi] = useState<ExamToolsUiState>({
+    calculatorOpen: false,
+    calculatorMinimized: false,
+    referenceOpen: false,
+    desktopRect: DEFAULT_EXAM_CALCULATOR_RECT,
+  });
+  const [desmosSessionState, setDesmosSessionState] = useState<DesmosSessionState>(null);
+  const [eliminatedOptionsByQuestion, setEliminatedOptionsByQuestion] =
+    useState<EliminatedOptionsByQuestion>({});
 
   const [questionSecondsLeft, setQuestionSecondsLeft] = useState<number | null>(null);
   const [examSecondsLeft, setExamSecondsLeft] = useState<number | null>(null);
@@ -321,6 +362,8 @@ export default function PracticeClient() {
     : `/practice?subject=${subject}`;
   const repairLessonHref = repairTopic ? focusedLessonHref(repairTopic) : "/lessons";
   const hasMathTools = subject === "Math" || subject === "Combined" || q?.subject === "Math";
+  const toolProfile: ToolProfile =
+    practiceMode === "exam" && mode === "in_session" ? "testing" : "learning";
   const toolsTopicHint = q?.topic || subskill || (subject === "Combined" ? q?.subject || "Math" : subject);
 
   const sessionOutcome = useMemo(() => {
@@ -462,7 +505,93 @@ export default function PracticeClient() {
 
   function pick(letter: string) {
     if (locked || saving) return;
+    if (q && eliminatedOptionsByQuestion[q.id]?.[letter as OptionLetter]) {
+      setEliminatedOptionsByQuestion((prev) => {
+        const current = prev[q.id];
+        if (!current || !current[letter as OptionLetter]) return prev;
+        return {
+          ...prev,
+          [q.id]: {
+            ...current,
+            [letter as OptionLetter]: false,
+          },
+        };
+      });
+    }
     setSelected(letter);
+  }
+
+  function toggleOptionElimination(letter: OptionLetter) {
+    if (!q || saving) return;
+
+    const questionId = q.id;
+    const shouldClearSelected = selected === letter;
+
+    setEliminatedOptionsByQuestion((prev) => {
+      const current = prev[questionId] || {};
+      const nextValue = !current[letter];
+      return {
+        ...prev,
+        [questionId]: {
+          ...current,
+          [letter]: nextValue,
+        },
+      };
+    });
+
+    if (shouldClearSelected) {
+      setSelected(null);
+      if (practiceMode === "exam") {
+        setExamDraftAnswers((prev) => {
+          if (prev[questionId] !== letter) return prev;
+          const next = { ...prev };
+          delete next[questionId];
+          return next;
+        });
+      }
+    }
+  }
+
+  function openToolSurface() {
+    if (toolProfile === "testing") {
+      setExamToolsUi((prev) => ({
+        ...prev,
+        calculatorOpen: true,
+        calculatorMinimized: false,
+      }));
+      return;
+    }
+    setToolsOpen(true);
+  }
+
+  function closeExamCalculator() {
+    setExamToolsUi((prev) => ({
+      ...prev,
+      calculatorOpen: false,
+      calculatorMinimized: false,
+    }));
+  }
+
+  function minimizeExamCalculator() {
+    setExamToolsUi((prev) => {
+      if (!prev.calculatorOpen) return prev;
+      return { ...prev, calculatorMinimized: true };
+    });
+  }
+
+  function restoreExamCalculator() {
+    setExamToolsUi((prev) => ({
+      ...prev,
+      calculatorOpen: true,
+      calculatorMinimized: false,
+    }));
+  }
+
+  function toggleExamReference() {
+    setExamToolsUi((prev) => ({
+      ...prev,
+      referenceOpen: !prev.referenceOpen,
+    }));
   }
 
   function toggleExamMarkCurrent() {
@@ -525,7 +654,15 @@ export default function PracticeClient() {
       setPoolNotice(null);
 
       const usesFreshPool = !subskill && !includeSeen;
-      const fetchLimit = usesFreshPool ? Math.max(limit * 6, 72) : limit;
+      const usesRevisitPool = !usesFreshPool;
+      const fallbackFetchLimit = Math.max(limit * 6, 72);
+      let disciplineFallbackNoted = false;
+
+      const noteDisciplineFallback = (message: string) => {
+        if (disciplineFallbackNoted) return;
+        setPoolNotice(message);
+        disciplineFallbackNoted = true;
+      };
 
       const fetchQuestions = async (args: {
         targetSubject: "Reading" | "Math";
@@ -538,6 +675,49 @@ export default function PracticeClient() {
           p_limit: args.targetLimit,
         });
         if (error) throw new Error(error.message);
+        return (data ?? []) as Question[];
+      };
+
+      const fetchDisciplinedPool = async (args: {
+        targetSubject: "Reading" | "Math";
+        targetSubskill: string | null;
+        targetLimit: number;
+        mode: "fresh" | "revisit";
+      }): Promise<Question[] | null> => {
+        const rpcName =
+          args.mode === "fresh"
+            ? "get_practice_questions_fresh"
+            : "get_practice_questions_revisit";
+        const scan = Math.max(args.targetLimit * 8, args.mode === "fresh" ? 96 : 120);
+
+        const payload =
+          args.mode === "fresh"
+            ? {
+                p_subject: args.targetSubject,
+                p_subskill: args.targetSubskill,
+                p_limit: args.targetLimit,
+                p_scan: scan,
+              }
+            : {
+                p_subject: args.targetSubject,
+                p_subskill: args.targetSubskill,
+                p_limit: args.targetLimit,
+                p_scan: scan,
+                p_cooldown_minutes: 45,
+              };
+
+        const { data, error } = await supabase.rpc(rpcName, payload);
+        if (error) {
+          if (isPracticePoolRpcUnavailable(error)) {
+            noteDisciplineFallback(
+              args.mode === "fresh"
+                ? "Fresh-pool backend discipline is not fully active yet. Using fallback rotation."
+                : "Revisit backend discipline is not fully active yet. Using fallback rotation."
+            );
+            return null;
+          }
+          throw new Error(error.message);
+        }
         return (data ?? []) as Question[];
       };
 
@@ -568,35 +748,79 @@ export default function PracticeClient() {
       let list: Question[] = [];
 
       if (subject === "Combined") {
-        const readingLimit = Math.ceil(fetchLimit / 2);
-        const mathLimit = Math.floor(fetchLimit / 2);
-        const [readingRaw, mathRaw] = await Promise.all([
-          fetchQuestions({
-            targetSubject: "Reading",
-            targetSubskill: null,
-            targetLimit: readingLimit,
-          }),
-          fetchQuestions({
-            targetSubject: "Math",
-            targetSubskill: null,
-            targetLimit: mathLimit,
-          }),
-        ]);
+        const readingLimit = Math.ceil(limit / 2);
+        const mathLimit = Math.floor(limit / 2);
+        let reading: Question[] | null = null;
+        let math: Question[] | null = null;
 
-        let reading = readingRaw;
-        let math = mathRaw;
-
-        if (usesFreshPool) {
-          const [seenReading, seenMath] = await Promise.all([
-            fetchSeenQuestionIds("Reading"),
-            fetchSeenQuestionIds("Math"),
+        if (usesFreshPool || usesRevisitPool) {
+          const mode: "fresh" | "revisit" = usesFreshPool ? "fresh" : "revisit";
+          const [readingDisciplined, mathDisciplined] = await Promise.all([
+            fetchDisciplinedPool({
+              targetSubject: "Reading",
+              targetSubskill: null,
+              targetLimit: readingLimit,
+              mode,
+            }),
+            fetchDisciplinedPool({
+              targetSubject: "Math",
+              targetSubskill: null,
+              targetLimit: mathLimit,
+              mode,
+            }),
           ]);
 
-          if (seenReading) {
-            reading = reading.filter((question) => !seenReading.has(question.id));
+          if (readingDisciplined && mathDisciplined) {
+            reading = readingDisciplined;
+            math = mathDisciplined;
           }
-          if (seenMath) {
-            math = math.filter((question) => !seenMath.has(question.id));
+        }
+
+        if (!reading || !math) {
+          const [readingRaw, mathRaw] = await Promise.all([
+            fetchQuestions({
+              targetSubject: "Reading",
+              targetSubskill: null,
+              targetLimit: fallbackFetchLimit,
+            }),
+            fetchQuestions({
+              targetSubject: "Math",
+              targetSubskill: null,
+              targetLimit: fallbackFetchLimit,
+            }),
+          ]);
+
+          reading = readingRaw;
+          math = mathRaw;
+
+          if (usesFreshPool) {
+            const [seenReading, seenMath] = await Promise.all([
+              fetchSeenQuestionIds("Reading"),
+              fetchSeenQuestionIds("Math"),
+            ]);
+
+            if (seenReading) {
+              reading = reading.filter((question) => !seenReading.has(question.id));
+            }
+            if (seenMath) {
+              math = math.filter((question) => !seenMath.has(question.id));
+            }
+          } else if (usesRevisitPool) {
+            const [seenReading, seenMath] = await Promise.all([
+              fetchSeenQuestionIds("Reading"),
+              fetchSeenQuestionIds("Math"),
+            ]);
+
+            if (seenReading?.size) {
+              const seenFirst = reading.filter((question) => seenReading.has(question.id));
+              const unseenRest = reading.filter((question) => !seenReading.has(question.id));
+              reading = [...seenFirst, ...unseenRest];
+            }
+            if (seenMath?.size) {
+              const seenFirst = math.filter((question) => seenMath.has(question.id));
+              const unseenRest = math.filter((question) => !seenMath.has(question.id));
+              math = [...seenFirst, ...unseenRest];
+            }
           }
         }
 
@@ -608,21 +832,44 @@ export default function PracticeClient() {
         }
         list = mixed.slice(0, limit);
       } else {
-        const base = await fetchQuestions({
-          targetSubject: subject,
-          targetSubskill: subskill || null,
-          targetLimit: fetchLimit,
-        });
-        let filtered = base;
+        let nextList: Question[] | null = null;
+        const targetSubskill = subskill || null;
 
-        if (usesFreshPool) {
-          const seen = await fetchSeenQuestionIds(subject);
-          if (seen) {
-            filtered = base.filter((question) => !seen.has(question.id));
-          }
+        if (usesFreshPool || usesRevisitPool) {
+          nextList = await fetchDisciplinedPool({
+            targetSubject: subject,
+            targetSubskill,
+            targetLimit: limit,
+            mode: usesFreshPool ? "fresh" : "revisit",
+          });
         }
 
-        list = filtered.slice(0, limit);
+        if (!nextList) {
+          const base = await fetchQuestions({
+            targetSubject: subject,
+            targetSubskill,
+            targetLimit: fallbackFetchLimit,
+          });
+          let filtered = base;
+
+          if (usesFreshPool) {
+            const seen = await fetchSeenQuestionIds(subject);
+            if (seen) {
+              filtered = base.filter((question) => !seen.has(question.id));
+            }
+          } else if (usesRevisitPool) {
+            const seen = await fetchSeenQuestionIds(subject);
+            if (seen?.size) {
+              const seenFirst = base.filter((question) => seen.has(question.id));
+              const unseenRest = base.filter((question) => !seen.has(question.id));
+              filtered = [...seenFirst, ...unseenRest];
+            }
+          }
+
+          nextList = filtered.slice(0, limit);
+        }
+
+        list = nextList.slice(0, limit);
       }
 
       if (!list.length && usesFreshPool) {
@@ -630,10 +877,19 @@ export default function PracticeClient() {
           "No fresh questions are currently available for this filter. Use Review or switch to explicit revisit."
         );
       }
+      if (!list.length && usesRevisitPool) {
+        throw new Error(
+          "No revisit questions are currently available for this filter. Run fresh mode or clear review debt first."
+        );
+      }
       if (!list.length) throw new Error("No questions returned for this filter.");
       if (usesFreshPool && list.length < limit) {
         setPoolNotice(
           `Only ${list.length} fresh question${list.length === 1 ? "" : "s"} available right now for this filter.`
+        );
+      } else if (usesRevisitPool && list.length < limit) {
+        setPoolNotice(
+          `Only ${list.length} revisit question${list.length === 1 ? "" : "s"} available right now for this filter.`
         );
       }
 
@@ -651,6 +907,14 @@ export default function PracticeClient() {
       setPostSessionMasteryProbe(null);
       setPostSessionSignalsNotice(null);
       setToolsOpen(false);
+      setExamToolsUi({
+        calculatorOpen: false,
+        calculatorMinimized: false,
+        referenceOpen: false,
+        desktopRect: DEFAULT_EXAM_CALCULATOR_RECT,
+      });
+      setDesmosSessionState(null);
+      setEliminatedOptionsByQuestion({});
       setExamDraftAnswers({});
       setExamMarked({});
       setExamNavFilter("all");
@@ -717,6 +981,14 @@ export default function PracticeClient() {
     setPostSessionMasteryProbe(null);
     setPostSessionSignalsNotice(null);
     setToolsOpen(false);
+    setExamToolsUi({
+      calculatorOpen: false,
+      calculatorMinimized: false,
+      referenceOpen: false,
+      desktopRect: DEFAULT_EXAM_CALCULATOR_RECT,
+    });
+    setDesmosSessionState(null);
+    setEliminatedOptionsByQuestion({});
     setExamDraftAnswers({});
     setExamMarked({});
     setExamNavFilter("all");
@@ -884,7 +1156,14 @@ export default function PracticeClient() {
 
     setMode("done");
     setToolsOpen(false);
-  }, [answers, sessionClientId, total, practiceMode, subject, subskill, examStartedAtMs, scoreBand.low, scoreBand.high, hydratePostSessionSignals]);
+    setExamToolsUi((prev) => ({
+      ...prev,
+      calculatorOpen: false,
+      calculatorMinimized: false,
+      referenceOpen: false,
+    }));
+    void refreshStudentState();
+  }, [answers, sessionClientId, total, practiceMode, subject, subskill, examStartedAtMs, scoreBand.low, scoreBand.high, hydratePostSessionSignals, refreshStudentState]);
 
   const finalizeExamSession = useCallback(async (args?: { forceAutoFill?: boolean }) => {
     if (!questions.length || saving) return;
@@ -1261,6 +1540,16 @@ export default function PracticeClient() {
 
   return (
     <main className="min-h-screen">
+      <StudyFeedbackFX
+        active={mode === "done"}
+        variant={analysis.outcome === "advance" ? "complete" : "recovery"}
+        intensity={analysis.outcome === "advance" ? "standard" : "subtle"}
+      />
+      <StudyFeedbackFX
+        active={mode === "in_session" && practiceMode !== "exam" && !!feedback?.correct}
+        variant="correct"
+        intensity="subtle"
+      />
       <PageHeader
         label={subskill ? "Targeted training" : "Fresh practice"}
         title="Practice"
@@ -1417,7 +1706,7 @@ export default function PracticeClient() {
                       </button>
                     </div>
                     <div className="mt-2 text-xs text-[#c8d4ed]">
-                      Fresh mode avoids casual repeats. Revisit mode is intentional drilling.
+                      Fresh mode is server-enforced unseen and not-due. Revisit mode is intentional seen-question drilling.
                     </div>
                   </div>
                 )}
@@ -1490,8 +1779,8 @@ export default function PracticeClient() {
                   <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Pool policy</div>
                   <div className="mt-2 text-sm text-[#d2dbec]">
                     {!includeSeen && !subskill
-                      ? "Fresh-only rotation. Previously seen questions are blocked from casual replay."
-                      : "Intentional revisit mode. Use this only for targeted reinforcement."}
+                      ? "Fresh-only rotation. Seen and due-review questions are blocked from casual replay."
+                      : "Intentional revisit mode. Pulls prior-seen questions first for explicit reinforcement."}
                   </div>
                 </div>
 
@@ -1505,6 +1794,35 @@ export default function PracticeClient() {
                     </Link>
                   )}
                 </div>
+
+                {studentState && (
+                  <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Shared student state</div>
+                    <div className="mt-2 text-sm text-[#d2dbec]">
+                      Debt {studentState.reviewDebt.dueCount} • Recommended mode {studentState.recommendedPracticeMode}
+                    </div>
+                    {studentState.weakestSkill && (
+                      <div className="mt-1 text-xs text-[#c8d4ed]">
+                        Weakest: {studentState.weakestSkill.subskill} ({studentState.weakestSkill.accuracyPct}% • {studentState.weakestSkill.confidence} confidence)
+                      </div>
+                    )}
+                    <div className="mt-3 text-xs text-[#c8d4ed]">{studentState.recommendedAction.reason}</div>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <Link
+                        href={studentState.recommendedAction.primaryHref}
+                        className="inline-flex items-center justify-center rounded-lg border border-[#5872a7] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb] transition hover:bg-white/15"
+                      >
+                        {studentState.recommendedAction.primaryLabel}
+                      </Link>
+                      <Link
+                        href={studentState.recommendedAction.secondaryHref}
+                        className="inline-flex items-center justify-center rounded-lg border border-[#5872a7] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb] transition hover:bg-white/15"
+                      >
+                        {studentState.recommendedAction.secondaryLabel}
+                      </Link>
+                    </div>
+                  </div>
+                )}
 
                 {subskill && (
                   <Link
@@ -1525,10 +1843,10 @@ export default function PracticeClient() {
                     <div className="mt-1 text-sm font-semibold text-white">Formula + calculator strategy available in-session</div>
                   </div>
                   <button
-                    onClick={() => setToolsOpen(true)}
+                    onClick={openToolSurface}
                     className="rounded-lg border border-[#4f6693] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb]"
                   >
-                    Open tools
+                    Open Bluebook tools
                   </button>
                 </div>
               </div>
@@ -1550,10 +1868,10 @@ export default function PracticeClient() {
                 <Pill text={`Combo ${momentum.combo}`} tone={momentum.currentStreak >= 4 ? "success" : "neutral"} />
                 {hasMathTools && (
                   <button
-                    onClick={() => setToolsOpen(true)}
+                    onClick={openToolSurface}
                     className="rounded-full border border-[#4f6795] bg-white/10 px-3 py-1 text-xs font-semibold text-[#d7e3fb] transition hover:bg-white/20"
                   >
-                    Tools
+                    Bluebook tools
                   </button>
                 )}
               </div>
@@ -1573,6 +1891,11 @@ export default function PracticeClient() {
             </div>
             <div className="mt-2 text-xs text-[#9db0d2]">{momentumStateLabel}</div>
             {practiceMode === "exam" && (
+              <div className="mt-3 rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-xs text-[#cedaf1]">
+                Bluebook shell behavior: save answers, mark uncertain items, use question map, then submit from checkpoint.
+              </div>
+            )}
+            {practiceMode === "exam" && (
               <div className="mt-3 grid gap-2 sm:grid-cols-3">
                 <div className="rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-xs text-[#cedaf1]">
                   Marked: <span className="font-semibold text-white">{examMarkedCount}</span>
@@ -1585,7 +1908,7 @@ export default function PracticeClient() {
                     onClick={() => setExamNavigatorOpen((prev) => !prev)}
                     className="rounded-lg border border-[#4f6795] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb]"
                   >
-                    {examNavigatorOpen ? "Hide map" : "Open map"}
+                    {examNavigatorOpen ? "Hide map" : "Question map"}
                   </button>
                   <button
                     onClick={() => setExamSubmitPanelOpen(true)}
@@ -1595,6 +1918,19 @@ export default function PracticeClient() {
                     Review & submit
                   </button>
                 </div>
+              </div>
+            )}
+            {practiceMode === "exam" && hasMathTools && (
+              <div className="mt-3">
+                <TestingToolsDock
+                  calculatorOpen={examToolsUi.calculatorOpen}
+                  calculatorMinimized={examToolsUi.calculatorMinimized}
+                  referenceOpen={examToolsUi.referenceOpen}
+                  onOpenCalculator={openToolSurface}
+                  onMinimizeCalculator={minimizeExamCalculator}
+                  onCloseCalculator={closeExamCalculator}
+                  onToggleReference={toggleExamReference}
+                />
               </div>
             )}
             {practiceMode === "exam" && examSections.length > 1 && (
@@ -1666,22 +2002,45 @@ export default function PracticeClient() {
                 const chosen = selected === letter;
                 const correct = locked && feedback && feedback.correct && q.correct_option.toUpperCase() === letter;
                 const wrongChosen = locked && chosen && feedback && !feedback.correct;
+                const eliminated = !!eliminatedOptionsByQuestion[q.id]?.[letter];
 
                 let cls = "border border-gray-200 bg-white shadow-sm";
                 if (chosen) cls = "border-[#0f1b33] bg-[#edf5ff] shadow-md";
                 if (correct) cls = "border-[#2a9b67] bg-[#edfcf3] shadow-md";
                 if (wrongChosen) cls = "border-[#d54768] bg-[#fff2f5] shadow-md";
+                if (eliminated) cls = `${cls} opacity-60`;
 
                 return (
-                  <button
-                    key={letter}
-                    onClick={() => pick(letter)}
-                    className={`w-full rounded-2xl p-4 text-left transition ${cls}`}
-                    disabled={saving || (practiceMode !== "exam" && locked)}
-                  >
-                    <div className="mb-1 text-xs font-semibold text-gray-500">{letter}</div>
-                    <div className="text-sm text-gray-900">{optionText(letter)}</div>
-                  </button>
+                  <div key={letter} className={`relative w-full rounded-2xl transition ${cls}`}>
+                    <button
+                      onClick={() => pick(letter)}
+                      className="w-full rounded-2xl p-4 pr-28 text-left"
+                      disabled={saving || (practiceMode !== "exam" && locked)}
+                    >
+                      <div className="mb-1 text-xs font-semibold text-gray-500">{letter}</div>
+                      <div className={`text-sm text-gray-900 ${eliminated ? "line-through" : ""}`}>
+                        {optionText(letter)}
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => toggleOptionElimination(letter)}
+                      className={[
+                        "absolute right-3 top-3 rounded-md border px-2 py-1 text-[11px] font-semibold transition",
+                        eliminated
+                          ? "border-[#8f9ab2] bg-[#f2f5fa] text-[#425269]"
+                          : "border-gray-300 bg-white text-gray-600 hover:border-gray-400",
+                      ].join(" ")}
+                      disabled={saving}
+                    >
+                      {eliminated ? "Undo X" : "Eliminate"}
+                    </button>
+                    {eliminated && (
+                      <div
+                        className="pointer-events-none absolute inset-x-4 top-1/2 h-px bg-[#7b879f]"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -1811,6 +2170,12 @@ export default function PracticeClient() {
                 <div>Answered {examAnsweredCount}/{total}</div>
                 <div>Marked {examMarkedCount}</div>
                 <div>Unanswered {examUnansweredCount}</div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-600">
+                <span className="rounded-full border border-[#0f1b33] bg-[#0f1b33] px-2.5 py-1 font-semibold text-white">Current</span>
+                <span className="rounded-full border border-[#6b7893] bg-[#eef3fb] px-2.5 py-1 font-semibold text-[#0f1b33]">Marked</span>
+                <span className="rounded-full border border-[#9de0bb] bg-[#ebfdf2] px-2.5 py-1 font-semibold text-[#0f8a4e]">Answered</span>
+                <span className="rounded-full border border-gray-200 bg-white px-2.5 py-1 font-semibold text-gray-600">Unanswered</span>
               </div>
               <div className="mt-3 grid gap-2 sm:grid-cols-2">
                 <button
@@ -1946,7 +2311,7 @@ export default function PracticeClient() {
                     onClick={() => setExamNavigatorOpen((prev) => !prev)}
                     className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700"
                   >
-                    {examNavigatorOpen ? "Hide map" : "Open map"}
+                    {examNavigatorOpen ? "Hide map" : "Question map"}
                   </button>
                 ) : hasMathTools ? (
                   <button
@@ -2069,6 +2434,20 @@ export default function PracticeClient() {
                     {postSessionRoute.secondaryLabel}
                   </SecondaryButton>
                 </div>
+                {repairTopic && (
+                  <div className="mt-4 rounded-2xl border border-[#d7e5fb] bg-[#f6faff] p-4">
+                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
+                      Lesson bridge
+                    </div>
+                    <div className="mt-2 text-sm text-gray-700">
+                      Repair the pattern, then rerun the exact subtopic.
+                    </div>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <SecondaryButton href={repairLessonHref}>Open lesson</SecondaryButton>
+                      <SecondaryButton href={repairPracticeHref}>Focused retry</SecondaryButton>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -2121,6 +2500,25 @@ export default function PracticeClient() {
                   {postSessionSignalsNotice && (
                     <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                       {postSessionSignalsNotice}
+                    </div>
+                  )}
+                  {studentState && (
+                    <div className="rounded-lg border border-[#d7e5fb] bg-[#f6faff] px-3 py-3">
+                      <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
+                        Unified state command
+                      </div>
+                      <div className="mt-2 text-sm font-semibold text-[#0f1b33]">
+                        {studentState.recommendedAction.title}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-700">{studentState.recommendedAction.reason}</div>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        <SecondaryButton href={studentState.recommendedAction.primaryHref}>
+                          {studentState.recommendedAction.primaryLabel}
+                        </SecondaryButton>
+                        <SecondaryButton href={studentState.recommendedAction.secondaryHref}>
+                          {studentState.recommendedAction.secondaryLabel}
+                        </SecondaryButton>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -2207,11 +2605,38 @@ export default function PracticeClient() {
       )}
 
       <MathToolsLayer
-        open={toolsOpen && hasMathTools}
+        open={toolsOpen && hasMathTools && toolProfile === "learning"}
         onClose={() => setToolsOpen(false)}
         topicHint={toolsTopicHint}
         modeLabel={modeLabel}
         strictExam={practiceMode === "exam" && mode === "in_session"}
+      />
+      <ExamFormulaReferenceSheet
+        open={toolProfile === "testing" && examToolsUi.referenceOpen}
+        onClose={() =>
+          setExamToolsUi((prev) => ({
+            ...prev,
+            referenceOpen: false,
+          }))
+        }
+      />
+      <FloatingDesmosCalculator
+        active={toolProfile === "testing" && hasMathTools}
+        open={examToolsUi.calculatorOpen}
+        minimized={examToolsUi.calculatorMinimized}
+        topicHint={toolsTopicHint}
+        desktopRect={examToolsUi.desktopRect}
+        onDesktopRectChange={(next) =>
+          setExamToolsUi((prev) => ({
+            ...prev,
+            desktopRect: next,
+          }))
+        }
+        onClose={closeExamCalculator}
+        onMinimize={minimizeExamCalculator}
+        onRestore={restoreExamCalculator}
+        sessionState={desmosSessionState}
+        onSessionStateChange={setDesmosSessionState}
       />
     </main>
   );

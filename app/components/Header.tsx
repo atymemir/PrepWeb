@@ -20,6 +20,7 @@ const appNavItems = [
 
 const publicNavItems = [
   { href: "/", label: "Product", match: "/" },
+  { href: "/how-it-works", label: "How it works", match: "/how-it-works" },
   { href: "/pricing", label: "Tiers", match: "/pricing" },
   { href: "/demo", label: "Demo", match: "/demo" },
 ];
@@ -31,6 +32,8 @@ function isActivePath(pathname: string, match: string) {
 function isPublicPath(pathname: string) {
   return (
     pathname === "/" ||
+    pathname.startsWith("/how-it-works") ||
+    pathname.startsWith("/welcome") ||
     pathname.startsWith("/pricing") ||
     pathname.startsWith("/login") ||
     pathname.startsWith("/demo")

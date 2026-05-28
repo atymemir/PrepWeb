@@ -2,6 +2,7 @@
 export const dynamic = 'force-dynamic';
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
 import { analyzeReviewSession, type SessionAnalysis } from "../lib/sessionAnalysis";
@@ -12,7 +13,6 @@ import {
   applyMomentumAnswer,
   createMomentum,
   createShareText,
-  pointsToNextDivision,
   type EngagementIdentity,
   type EngagementStatus,
   type SessionMomentum,
@@ -24,9 +24,10 @@ import {
 } from "../lib/engagementDurable";
 import { recordStudySession } from "../lib/sessionHistory";
 import { focusedLessonHref, focusedPracticeHref } from "../lib/mastery";
-import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import { useStudentState } from "../lib/useStudentState";
+import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
 import QuestionActionBlock from "../components/QuestionActionBlock";
-import { SessionPayoffCard } from "../components/EngagementSystem";
+import StudyFeedbackFX from "../components/StudyFeedbackFX";
 
 type Question = {
   id: string;
@@ -103,15 +104,54 @@ function reviewReasonTone(
   return "neutral";
 }
 
+type QueueDueReason = "single-unresolved" | "cluster-relapse" | "high-pressure" | "unknown-skill";
+
+function queueDueReasonFor(args: {
+  question: Question;
+  topicLoad: number;
+}): QueueDueReason {
+  const topic = topicKey(args.question.topic);
+  if (topic === "Unknown") return "unknown-skill";
+  if (args.topicLoad >= 4) return "high-pressure";
+  if (args.topicLoad >= 2) return "cluster-relapse";
+  return "single-unresolved";
+}
+
+function queueDueReasonLabel(reason: QueueDueReason): string {
+  if (reason === "high-pressure") return "High-pressure topic";
+  if (reason === "cluster-relapse") return "Topic relapse cluster";
+  if (reason === "unknown-skill") return "Unknown-skill debt";
+  return "Single unresolved miss";
+}
+
+function queueDueReasonNote(reason: QueueDueReason): string {
+  if (reason === "high-pressure") return "Multiple due items in this topic are still unresolved.";
+  if (reason === "cluster-relapse") return "This topic has repeated due items and needs clean recovery.";
+  if (reason === "unknown-skill") return "Topic labeling is weak here, so treat this as active debt.";
+  return "A prior miss is still open and returned for recovery.";
+}
+
+function queueDueReasonTone(reason: QueueDueReason): "neutral" | "accent" | "danger" {
+  if (reason === "high-pressure") return "danger";
+  if (reason === "cluster-relapse" || reason === "unknown-skill") return "accent";
+  return "neutral";
+}
+
 export default function ReviewPage() {
   const router = useRouter();
+  const { state: studentState, refresh: refreshStudentState } = useStudentState({
+    dueLimit: 120,
+    historyLimit: 64,
+  });
   const limit = 12;
+  const queuePreviewLimit = 120;
 
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState<"ready" | "in_session" | "done">("ready");
   const [err, setErr] = useState<string | null>(null);
 
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [fullDueQuestions, setFullDueQuestions] = useState<Question[]>([]);
   const [idx, setIdx] = useState(0);
 
   const [selected, setSelected] = useState<string | null>(null);
@@ -157,6 +197,11 @@ export default function ReviewPage() {
 
   const q = questions[idx];
   const total = questions.length;
+  const queueTotalCount = queueStartCount ?? fullDueQuestions.length;
+  const currentBlockCount = questions.length;
+  const deferredQueueCount = Math.max(queueTotalCount - currentBlockCount, 0);
+  const queueCountLabel = queueTotalCount >= queuePreviewLimit ? `${queuePreviewLimit}+` : `${queueTotalCount}`;
+  const blockCountLabel = `${currentBlockCount}/${queueCountLabel}`;
 
   const reviewAnalysis = useMemo(() => {
     return analyzeReviewSession(
@@ -173,11 +218,12 @@ export default function ReviewPage() {
   const accuracyPct = analysis.accuracyPct;
 
   const queueTone = useMemo(() => {
-    if (questions.length === 0) return "success" as const;
-    if (questions.length <= 4) return "accent" as const;
-    if (questions.length <= 8) return "accent" as const;
+    const pressure = queueTotalCount;
+    if (pressure === 0) return "success" as const;
+    if (pressure <= 4) return "accent" as const;
+    if (pressure <= 8) return "accent" as const;
     return "danger" as const;
-  }, [questions.length]);
+  }, [queueTotalCount]);
 
   const currentReviewReason = useMemo(() => {
     if (!q) return null;
@@ -213,9 +259,23 @@ export default function ReviewPage() {
     return { text: "Advance", tone: "success" as const };
   }, [analysis.outcome]);
 
+  const queueSource = useMemo(
+    () => (fullDueQuestions.length ? fullDueQuestions : questions),
+    [fullDueQuestions, questions]
+  );
+
+  const queueTopicLoad = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const question of queueSource) {
+      const topic = topicKey(question.topic);
+      map.set(topic, (map.get(topic) ?? 0) + 1);
+    }
+    return map;
+  }, [queueSource]);
+
   const queueTopicBuckets = useMemo(() => {
     const buckets = new Map<string, { topic: string; subject: string; count: number }>();
-    for (const question of questions) {
+    for (const question of queueSource) {
       const topic = topicKey(question.topic);
       const key = `${question.subject}:${topic}`;
       if (!buckets.has(key)) {
@@ -227,33 +287,93 @@ export default function ReviewPage() {
       if (a.count !== b.count) return b.count - a.count;
       return a.topic.localeCompare(b.topic);
     });
-  }, [questions]);
+  }, [queueSource]);
 
-  const queueSubjectBuckets = useMemo(() => {
-    const buckets = new Map<string, number>();
-    for (const question of questions) {
-      const subject = question.subject || "Reading";
-      buckets.set(subject, (buckets.get(subject) ?? 0) + 1);
+  const queueDueReasonBuckets = useMemo(() => {
+    const buckets = new Map<QueueDueReason, number>();
+    for (const question of queueSource) {
+      const topic = topicKey(question.topic);
+      const reason = queueDueReasonFor({
+        question,
+        topicLoad: queueTopicLoad.get(topic) ?? 0,
+      });
+      buckets.set(reason, (buckets.get(reason) ?? 0) + 1);
     }
+
     return [...buckets.entries()]
-      .map(([subject, count]) => ({ subject, count }))
+      .map(([reason, count]) => ({ reason, count }))
       .sort((a, b) => b.count - a.count);
-  }, [questions]);
+  }, [queueSource, queueTopicLoad]);
+
+  const currentQueueDueReason = useMemo(() => {
+    if (!q) return null;
+    const topic = topicKey(q.topic);
+    return queueDueReasonFor({
+      question: q,
+      topicLoad: queueTopicLoad.get(topic) ?? 0,
+    });
+  }, [q, queueTopicLoad]);
+
+  const queueMeterPct = useMemo(() => {
+    if (queueTotalCount === 0) return 100;
+    return Math.max(12, Math.min(100, Math.round((currentBlockCount / queueTotalCount) * 100)));
+  }, [currentBlockCount, queueTotalCount]);
 
   const liveRemainingDebt = useMemo(
     () => Math.max(total - analysis.reviewedCount, 0),
     [total, analysis.reviewedCount]
   );
 
+  const liveRecoveryPct = useMemo(() => {
+    if (!total) return 0;
+    return Math.round((analysis.reviewedCount / total) * 100);
+  }, [analysis.reviewedCount, total]);
+
   const recoveryRatePct = useMemo(() => {
     if (analysis.reviewedCount === 0) return 0;
     return Math.round((analysis.correctCount / analysis.reviewedCount) * 100);
   }, [analysis.correctCount, analysis.reviewedCount]);
 
+  const currentDueReasonLine = useMemo(() => {
+    if (!currentQueueDueReason) return "Returned from unresolved prior debt.";
+    if (!locked || !feedback) return queueDueReasonNote(currentQueueDueReason);
+    if (feedback.correct) return "Recovered on this attempt. Queue retirement depends on scheduler confirmation.";
+    return "Failed recovery on this attempt. This item stays active debt.";
+  }, [currentQueueDueReason, feedback, locked]);
+
   const debtDelta = useMemo(() => {
     if (queueStartCount === null || queueAfterCount === null) return null;
     return queueStartCount - queueAfterCount;
   }, [queueAfterCount, queueStartCount]);
+
+  const debtDeltaLabel = useMemo(() => {
+    if (debtDelta === null) return "Pending";
+    if (debtDelta > 0) return `${debtDelta} cleared`;
+    if (debtDelta === 0) return "No net change";
+    return `${Math.abs(debtDelta)} added`;
+  }, [debtDelta]);
+
+  const recoveryVerdict = useMemo(() => {
+    if (analysis.outcome === "rebuild") {
+      return {
+        title: "Rebuild the pattern",
+        note: "Accuracy is too unstable for forward volume. Lesson first, then a targeted set.",
+        tone: "danger" as const,
+      };
+    }
+    if (analysis.outcome === "stabilize") {
+      return {
+        title: "Stabilize the miss",
+        note: "You recovered part of the queue. Run a focused set before broad practice.",
+        tone: "accent" as const,
+      };
+    }
+    return {
+      title: "Debt under control",
+      note: "The block was clean enough to advance. Keep review active after new misses.",
+      tone: "success" as const,
+    };
+  }, [analysis.outcome]);
 
   const nextRecoveryRoute = useMemo(() => {
     if ((queueAfterCount ?? 0) > 0) {
@@ -294,6 +414,23 @@ export default function ReviewPage() {
       secondaryLabel: "Check due queue",
     };
   }, [queueAfterCount, repairPracticeHref, analysis.outcome, repairLessonHref]);
+
+  const exactNextStep = useMemo(() => {
+    if ((queueAfterCount ?? 0) > 0) {
+      return `Next step now: continue the recovery queue (${queueAfterCount} due remain).`;
+    }
+    if (analysis.outcome === "rebuild") {
+      return repairTopic
+        ? `Next step now: open ${repairTopic} lesson, then run targeted practice.`
+        : "Next step now: open a repair lesson, then run targeted practice.";
+    }
+    if (analysis.outcome === "stabilize") {
+      return repairTopic
+        ? `Next step now: run targeted practice on ${repairTopic}.`
+        : "Next step now: run one targeted practice set before broad volume.";
+    }
+    return "Next step now: return to forward practice, then re-check review after new misses.";
+  }, [analysis.outcome, queueAfterCount, repairTopic]);
 
   const failedTopicRoutes = useMemo(() => {
     return analysis.failedTopics.slice(0, 2).map((topic) => {
@@ -349,6 +486,7 @@ export default function ReviewPage() {
     setErr(null);
     setMode("ready");
     setQuestions([]);
+    setFullDueQuestions([]);
     setIdx(0);
     resetQuestionUI();
     setAnswers({});
@@ -374,13 +512,15 @@ export default function ReviewPage() {
       }
 
       const supabase = getSupabase();
-      const { data, error } = await supabase.rpc("get_due_review_questions", { p_limit: limit });
+      const { data, error } = await supabase.rpc("get_due_review_questions", { p_limit: queuePreviewLimit });
       if (error) throw new Error(error.message);
 
-      const list = (data ?? []) as Question[];
-      setQuestions(list);
-      setQueueStartCount(list.length);
-      setMomentum(createMomentum(list.length || limit));
+      const fullList = (data ?? []) as Question[];
+      const blockList = fullList.slice(0, limit);
+      setFullDueQuestions(fullList);
+      setQuestions(blockList);
+      setQueueStartCount(fullList.length);
+      setMomentum(createMomentum(blockList.length || limit));
       setSessionPayoff(null);
       setShareText("");
       setCopiedShare(false);
@@ -403,7 +543,7 @@ export default function ReviewPage() {
     setSessionClientId(createClientSessionId());
     setHistorySessionId(null);
     setReviewStartedAtMs(Date.now());
-    setQueueStartCount(questions.length);
+    setQueueStartCount(queueTotalCount);
     setFinalAnalysis(null);
     setQueueAfterCount(null);
     setPostSessionNotice(null);
@@ -642,7 +782,7 @@ export default function ReviewPage() {
 
       try {
         const supabase = getSupabase();
-        const dueRes = await supabase.rpc("get_due_review_questions", { p_limit: 120 });
+        const dueRes = await supabase.rpc("get_due_review_questions", { p_limit: queuePreviewLimit });
         if (dueRes.error) throw new Error(dueRes.error.message);
         setQueueAfterCount(((dueRes.data ?? []) as Question[]).length);
       } catch (postErr: unknown) {
@@ -657,6 +797,7 @@ export default function ReviewPage() {
     }
 
     setMode("done");
+    void refreshStudentState();
   }
 
   async function nextOrFinish() {
@@ -694,10 +835,20 @@ export default function ReviewPage() {
 
   return (
     <main className="min-h-screen">
+      <StudyFeedbackFX
+        active={mode === "done"}
+        variant={analysis.outcome === "advance" ? "complete" : "recovery"}
+        intensity={analysis.outcome === "advance" ? "standard" : "subtle"}
+      />
+      <StudyFeedbackFX
+        active={mode === "in_session" && !!feedback?.correct}
+        variant="correct"
+        intensity="subtle"
+      />
       <PageHeader
         label="Recovery workflow"
         title="Review"
-        subtitle="Clear due mistakes before you push new practice."
+        subtitle="Clear one focused recovery block, then decide whether to continue debt or route to repair."
         right={
           <button
             onClick={() => router.push("/today")}
@@ -707,13 +858,6 @@ export default function ReviewPage() {
           </button>
         }
       />
-
-      {!loading && !err && (
-        <LoopRail
-          active="Review"
-          note="Review clears active mistake debt before more forward work."
-        />
-      )}
 
       {loading && (
         <Card title="Loading…" subtitle="Pulling your review queue">
@@ -739,106 +883,131 @@ export default function ReviewPage() {
             </div>
           )}
 
-          <Card
-            title="Recovery command"
-            subtitle="Unfinished mistakes are active debt. Clear them before new volume."
-            right={<Pill text={questions.length > 0 ? `${questions.length} due` : "Queue clear"} tone={queueTone} />}
-            accent={questions.length > 0}
-            prominence={questions.length > 0 ? "prominent" : "default"}
-          >
+          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] shadow-xl">
             {questions.length === 0 ? (
-              <>
-                <div className="rounded-2xl border border-[#9de0bb] bg-[#ebfdf2] p-4 text-sm text-[#0f8a4e]">
-                  Recovery queue is clear. Forward work is unlocked.
-                </div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <PrimaryButton href="/practice?subject=Reading">Practice Reading</PrimaryButton>
-                  <SecondaryButton href="/practice?subject=Math">Practice Math</SecondaryButton>
-                </div>
-              </>
-            ) : (
-              <>
-                <section className="ink-surface overflow-hidden rounded-[28px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
-                  <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.1fr_0.9fr]">
-                    <div>
-                      <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
-                        Debt to clear now
-                      </div>
-                      <div className="mt-2 text-4xl font-semibold tracking-tight text-white">{questions.length}</div>
-                      <div className="mt-2 text-sm text-[#d2dbec]">
-                      {questions.length >= 6 ? "High pressure queue." : "Manageable queue."} Finish this block before starting fresh practice.
-                      </div>
-                      <div className="mt-4 h-2 rounded-full bg-white/10">
-                        <div
-                          className="h-full rounded-full bg-[linear-gradient(90deg,#7eb5ff,#b9d9ff)]"
-                          style={{ width: `${Math.max(14, Math.min(100, (questions.length / limit) * 100))}%` }}
-                        />
-                      </div>
+              <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.1fr_0.9fr]">
+                <div>
+                  <div className="inline-flex items-center rounded-full border border-[#4f9a72] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bff2d2]">
+                    Queue clear
+                  </div>
+                  <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+                    No unfinished debt
+                  </h2>
+                  <p className="mt-3 max-w-2xl text-sm leading-relaxed text-[#d3efdf]">
+                    Recovery is clear. Move into forward practice and let new misses refill queue only when needed.
+                  </p>
+                  <div className="mt-6 grid gap-3 sm:max-w-xl sm:grid-cols-2">
+                    <PrimaryButton href="/practice?subject=Reading">Practice Reading</PrimaryButton>
+                    <SecondaryButton href="/practice?subject=Math">Practice Math</SecondaryButton>
+                  </div>
+                  {studentState && (
+                    <div className="mt-4 rounded-xl border border-white/20 bg-white/10 px-3 py-3 text-xs text-[#d3efdf]">
+                      Shared command: {studentState.recommendedAction.title}
                     </div>
+                  )}
+                </div>
+                <div className="rounded-2xl border border-white/20 bg-white/10 p-4 text-sm text-[#d3efdf]">
+                  <div className="font-semibold text-white">Debt now: 0</div>
+                  <div className="mt-2 text-xs">Queue state: Clear</div>
+                </div>
+              </div>
+            ) : (
+              <div className="p-5 sm:p-6">
+                <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
+                  Queue and debt
+                </div>
+                <h2 className="mt-3 text-4xl font-semibold tracking-tight text-white sm:text-5xl">
+                  {queueCountLabel} due
+                </h2>
+                <p className="mt-3 max-w-2xl text-sm leading-relaxed text-[#d2dbec]">
+                  Current block: {currentBlockCount}. Deferred after launch: {deferredQueueCount}.
+                </p>
+                <div className="mt-5 h-3 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="h-full rounded-full bg-[linear-gradient(90deg,#ff89a3,#8fc1ff)]"
+                    style={{ width: `${queueMeterPct}%` }}
+                  />
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2 text-xs text-[#c8d4ed]">
+                  <Pill text={`Block ${blockCountLabel}`} tone={queueTone} />
+                  <span>{queueLabel(queueTotalCount)}</span>
+                  {queueDueReasonBuckets[0] && (
+                    <Pill text={queueDueReasonLabel(queueDueReasonBuckets[0].reason)} tone={queueDueReasonTone(queueDueReasonBuckets[0].reason)} />
+                  )}
+                  {identity && identityStatus && (
+                    <span>{identityStatus.division.label} L{identityStatus.level} • {identity.streakDays}d streak</span>
+                  )}
+                </div>
 
-                    <div className="grid gap-3">
-                      <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-sm text-[#cbd8f0]">
-                        Session cap: <span className="font-semibold text-white">{limit}</span>
-                      </div>
-                      <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-sm text-[#cbd8f0]">
-                        Queue state: <span className="font-semibold text-white">{queueLabel(questions.length)}</span>
-                      </div>
-                      {identity && identityStatus && (
-                        <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-sm text-[#cbd8f0]">
-                          {identityStatus.division.label} L{identityStatus.level} • {identity.streakDays}d streak
-                        </div>
-                      )}
+                <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
+                  <button
+                    onClick={startSession}
+                    className="inline-flex items-center justify-center rounded-xl bg-white px-4 py-3 text-sm font-semibold text-[#0f1b33] transition hover:bg-[#ecf3ff]"
+                  >
+                    Start recovery block
+                  </button>
+                  <SecondaryButton href="/today">Back to Today</SecondaryButton>
+                </div>
+
+                {studentState && (
+                  <div className="mt-4 rounded-xl border border-white/20 bg-white/10 p-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#bdd5ff]">
+                      Unified student state
+                    </div>
+                    <div className="mt-2 text-xs text-[#d8e5fc]">
+                      {studentState.recommendedAction.reason}
+                    </div>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <Link
+                        href={studentState.recommendedAction.primaryHref}
+                        className="inline-flex items-center justify-center rounded-lg border border-[#5872a7] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb] transition hover:bg-white/15"
+                      >
+                        {studentState.recommendedAction.primaryLabel}
+                      </Link>
+                      <Link
+                        href={studentState.recommendedAction.secondaryHref}
+                        className="inline-flex items-center justify-center rounded-lg border border-[#5872a7] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb] transition hover:bg-white/15"
+                      >
+                        {studentState.recommendedAction.secondaryLabel}
+                      </Link>
                     </div>
                   </div>
-                </section>
+                )}
 
-                <div className="mt-4 grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
-                  <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                      Due topics now
+                <div className="mt-6 grid gap-4 lg:grid-cols-[1.08fr_0.92fr]">
+                  <div className="rounded-2xl border border-white/20 bg-white/10 p-4">
+                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#bdd5ff]">
+                      Debt topics
                     </div>
                     <div className="mt-3 grid gap-2">
                       {queueTopicBuckets.slice(0, 4).map((bucket) => (
-                        <div
-                          key={`${bucket.subject}-${bucket.topic}`}
-                          className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700"
-                        >
-                          <span className="font-semibold text-black">{bucket.topic}</span>
-                          <span className="mx-1 text-gray-300">•</span>
-                          {bucket.subject}
-                          <span className="mx-1 text-gray-300">•</span>
-                          {bucket.count} due
+                        <div key={`${bucket.subject}-${bucket.topic}`} className="flex items-center justify-between rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm text-[#e2ebff]">
+                          <span>{bucket.topic}</span>
+                          <span className="font-semibold">{bucket.count}</span>
                         </div>
                       ))}
                     </div>
                   </div>
-
-                  <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                      Queue subject split
+                  <div className="rounded-2xl border border-white/20 bg-white/10 p-4">
+                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#bdd5ff]">
+                      Due reason split
                     </div>
                     <div className="mt-3 grid gap-2">
-                      {queueSubjectBuckets.map((bucket) => (
-                        <div
-                          key={bucket.subject}
-                          className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700"
-                        >
-                          <span className="font-semibold text-black">{bucket.subject}</span>
-                          <span className="mx-1 text-gray-300">•</span>
-                          {bucket.count} item{bucket.count === 1 ? "" : "s"}
+                      {queueDueReasonBuckets.map((bucket) => (
+                        <div key={bucket.reason} className="flex items-center justify-between rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm text-[#e2ebff]">
+                          <span>{queueDueReasonLabel(bucket.reason)}</span>
+                          <Pill text={`${bucket.count}`} tone={queueDueReasonTone(bucket.reason)} />
                         </div>
                       ))}
                     </div>
+                    <div className="mt-3 text-xs text-[#c8d4ed]">
+                      Full debt {queueCountLabel} • Block {currentBlockCount} • Deferred {deferredQueueCount}
+                    </div>
                   </div>
                 </div>
-
-                <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                  <PrimaryButton onClick={startSession}>Start review</PrimaryButton>
-                  <SecondaryButton href="/today">Back to Today</SecondaryButton>
-                </div>
-              </>
+              </div>
             )}
-          </Card>
+          </section>
         </div>
       )}
 
@@ -851,132 +1020,183 @@ export default function ReviewPage() {
               </div>
               <div className="flex flex-wrap gap-2">
                 <Pill text={`Accuracy ${accuracyPct}%`} tone={accuracyPct >= 70 ? "success" : "accent"} />
-                <Pill text={`Combo ${momentum.combo}`} tone={momentum.currentStreak >= 3 ? "success" : "neutral"} />
+                {currentQueueDueReason && (
+                  <Pill text={queueDueReasonLabel(currentQueueDueReason)} tone={queueDueReasonTone(currentQueueDueReason)} />
+                )}
               </div>
             </div>
             <div className="mt-3 h-2.5 rounded-full bg-white/10">
               <div className="h-full rounded-full bg-[linear-gradient(90deg,#7eb5ff,#b9d9ff)]" style={{ width: `${momentum.progressPct}%` }} />
             </div>
-            <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-[#c8d4ed] sm:grid-cols-4">
+            <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-[#c8d4ed]">
               <div>Cleared {analysis.reviewedCount}</div>
-              <div>Correct {analysis.correctCount}</div>
               <div>Remaining {liveRemainingDebt}</div>
-              <div className="sm:text-right">Recovery {recoveryRatePct}%</div>
+              <div>Recovery {recoveryRatePct}%</div>
             </div>
             <div className="mt-2 text-xs text-[#a2b5d8]">
-              Queue pressure: {queueLabel(Math.max(queueStartCount ?? total, 0))}
+              Block {total} of {queueCountLabel} due items. {deferredQueueCount > 0 ? `${deferredQueueCount} stay queued after this block.` : "No deferred debt detected."}
             </div>
           </div>
 
-          <Card
-            title={`Recovery item ${idx + 1}`}
-            subtitle={`Reason: ${currentReviewReason ? reviewReasonLabel(currentReviewReason) : "Review item"} • Accuracy so far: ${accuracyPct}%`}
-            right={
-              <Pill
-                text={currentReviewReason ? reviewReasonLabel(currentReviewReason) : "Review mode"}
-                tone={currentReviewReason ? reviewReasonTone(currentReviewReason) : "accent"}
-              />
-            }
-            accent
-            prominence="prominent"
-          >
-            <div className="text-lg font-medium leading-relaxed whitespace-pre-line text-[#0f172a]">
-              {q.question_text}
-            </div>
+          <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
+            <div className="rounded-3xl border border-[#b9d6ff] bg-white/95 p-5 shadow-lg sm:p-6">
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
+                    Recovery item {idx + 1}
+                  </div>
+                  <div className="mt-1 text-sm text-gray-600">
+                    {q.topic || "Unknown"} • {q.subject}
+                  </div>
+                </div>
+                <Pill
+                  text={currentReviewReason ? reviewReasonLabel(currentReviewReason) : "Review mode"}
+                  tone={currentReviewReason ? reviewReasonTone(currentReviewReason) : "accent"}
+                />
+              </div>
 
-            <div className="mt-6 space-y-3">
-              {(["A", "B", "C", "D"] as const).map((letter) => {
-                const chosen = selected === letter;
-                const correct = locked && q.correct_option.toUpperCase() === letter;
-                const wrongChosen = locked && chosen && !correct;
+              <div className="text-lg font-medium leading-relaxed whitespace-pre-line text-[#0f172a]">
+                {q.question_text}
+              </div>
 
-                let cls = "border border-gray-200 bg-white shadow-sm";
-                if (chosen) cls = "border-[#0f1b33] bg-[#edf5ff] shadow-md";
-                if (correct) cls = "border-[#2a9b67] bg-[#edfcf3] shadow-md";
-                if (wrongChosen) cls = "border-[#d54768] bg-[#fff2f5] shadow-md";
+              <div className="mt-6 grid gap-3">
+                {(["A", "B", "C", "D"] as const).map((letter) => {
+                  const chosen = selected === letter;
+                  const correct = locked && q.correct_option.toUpperCase() === letter;
+                  const wrongChosen = locked && chosen && !correct;
 
-                return (
+                  let cls = "border border-gray-200 bg-white shadow-sm";
+                  if (chosen) cls = "border-[#0f1b33] bg-[#edf5ff] shadow-md";
+                  if (correct) cls = "border-[#2a9b67] bg-[#edfcf3] shadow-md";
+                  if (wrongChosen) cls = "border-[#d54768] bg-[#fff2f5] shadow-md";
+
+                  return (
+                    <button
+                      key={letter}
+                      onClick={() => pick(letter)}
+                      className={`grid w-full grid-cols-[2.25rem_1fr] items-start gap-3 rounded-2xl p-4 text-left transition ${cls}`}
+                      disabled={saving}
+                    >
+                      <div className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 bg-white text-xs font-bold text-gray-600">
+                        {letter}
+                      </div>
+                      <div className="pt-1 text-sm leading-relaxed text-gray-900">{optionText(letter)}</div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {err && (
+                <div className="mt-5 rounded-xl border border-[#f5b8c4] bg-[#fff2f5] p-4 text-sm text-[#b02039]">
+                  {err}
+                  <div className="mt-3 grid gap-2">
+                    <PrimaryButton onClick={retryRecord} disabled={saving}>
+                      {saving ? "Retrying…" : "Retry record"}
+                    </PrimaryButton>
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+                {!locked ? (
                   <button
-                    key={letter}
-                    onClick={() => pick(letter)}
-                    className={`w-full rounded-2xl p-4 text-left transition ${cls}`}
+                    className="inline-flex w-full items-center justify-center rounded-xl bg-[#0e1b34] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#1a2b4a] disabled:opacity-60 sm:w-auto"
+                    onClick={submit}
+                    disabled={!selected || saving}
+                  >
+                    {saving ? "Saving..." : "Submit recovery answer"}
+                  </button>
+                ) : (
+                  <button
+                    className="inline-flex w-full items-center justify-center rounded-xl bg-[#0e1b34] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#1a2b4a] disabled:opacity-60 sm:w-auto"
+                    onClick={nextOrFinish}
                     disabled={saving}
                   >
-                    <div className="mb-1 text-xs font-semibold text-gray-500">{letter}</div>
-                    <div className="text-sm text-gray-900">{optionText(letter)}</div>
+                    {idx === total - 1 ? "Finish recovery block" : "Next recovery item"}
                   </button>
-                );
-              })}
+                )}
+                <button
+                  onClick={previousQuestion}
+                  disabled={idx <= 0 || saving}
+                  className="inline-flex w-full items-center justify-center rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-gray-700 transition hover:bg-gray-50 disabled:opacity-50 sm:w-auto"
+                >
+                  Previous
+                </button>
+              </div>
             </div>
 
-            {err && (
-              <div className="mt-5 rounded-xl border border-[#f5b8c4] bg-[#fff2f5] p-4 text-sm text-[#b02039]">
-                {err}
-                <div className="mt-3 grid gap-2">
-                  <PrimaryButton onClick={retryRecord} disabled={saving}>
-                    {saving ? "Retrying…" : "Retry record"}
-                  </PrimaryButton>
-                </div>
+            <aside className="rounded-3xl border border-gray-200 bg-white/92 p-5 shadow-sm">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
+                Live recovery shell
               </div>
-            )}
-
-            <div className="mt-6 flex gap-3 items-start">
-              {!locked ? (
-                <button
-                  className="w-full rounded-xl bg-[#0e1b34] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#1a2b4a] disabled:opacity-60 sm:w-auto"
-                  onClick={submit}
-                  disabled={!selected || saving}
-                >
-                  {saving ? "Saving…" : "Submit recovery answer"}
-                </button>
-              ) : (
-                <button
-                  className="w-full rounded-xl bg-[#0e1b34] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#1a2b4a] disabled:opacity-60 sm:w-auto"
-                  onClick={nextOrFinish}
-                  disabled={saving}
-                >
-                  {idx === total - 1 ? "Finish recovery block" : "Next recovery item"}
-                </button>
-              )}
-
-              {locked && feedback && (
-                <div className={`flex-1 rounded-2xl border p-5 ${feedback.correct ? "border-[#9de0bb] bg-[#ebfdf2]" : "border-[#f5b8c4] bg-[#fff2f5]"}`}>
-                  <div className={`font-semibold ${feedback.correct ? "text-[#0f8a4e]" : "text-[#b02039]"}`}>
-                    {feedback.correct ? "Recovered" : "Still unstable"}
-                  </div>
-
-                  <div className="mt-1 text-xs text-gray-600">
-                    Reward: +{momentum.instantXp} XP • Combo {momentum.combo}
-                  </div>
-
-                  {!feedback.correct && (
-                    <div className="mt-1 text-sm text-gray-700">
-                      Correct answer: <span className="font-semibold">{feedback.correctOption}</span>
-                    </div>
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Due reason</div>
+                  {currentQueueDueReason && (
+                    <Pill text={queueDueReasonLabel(currentQueueDueReason)} tone={queueDueReasonTone(currentQueueDueReason)} />
                   )}
-
-                  {q.explanation ? (
-                    <div className="mt-3 text-sm text-gray-700 whitespace-pre-line">
-                      <span className="font-semibold">Explanation:</span> {q.explanation}
-                    </div>
-                  ) : (
-                    <div className="mt-3 text-sm text-gray-600">No explanation available yet.</div>
-                  )}
-                  <QuestionActionBlock
-                    mode="review"
-                    questionId={q.id}
-                    subject={q.subject}
-                    subskill={q.topic || undefined}
-                    onExplain={generateAiExplanation}
-                    aiExplainLoading={aiExplainLoading}
-                    aiExplainError={aiExplainError}
-                    aiExplain={aiExplain}
-                    contextLine={`Review reason: ${currentReviewReason ?? "new mistake"}`}
+                </div>
+                <div className="mt-2 text-sm text-gray-700">{currentDueReasonLine}</div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-lg border border-gray-200 bg-white px-2 py-2 text-gray-700">
+                    Left <span className="font-semibold text-black">{liveRemainingDebt}</span>
+                  </div>
+                  <div className="rounded-lg border border-gray-200 bg-white px-2 py-2 text-gray-700">
+                    Recovered <span className="font-semibold text-black">{analysis.correctCount}</span>
+                  </div>
+                </div>
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-200">
+                  <div
+                    className="h-full rounded-full bg-[#0e1b34]"
+                    style={{ width: `${liveRecoveryPct}%` }}
                   />
                 </div>
-              )}
-            </div>
-          </Card>
+                <div className="mt-2 text-xs text-gray-600">
+                  {analysis.reviewedCount}/{total} processed • {analysis.incorrectCount} unstable
+                </div>
+              </div>
+
+              <div className="mt-3">
+                {locked && feedback ? (
+                  <div className={`rounded-2xl border p-4 ${feedback.correct ? "border-[#9de0bb] bg-[#ebfdf2]" : "border-[#f5b8c4] bg-[#fff2f5]"}`}>
+                    <div className={`text-base font-semibold ${feedback.correct ? "text-[#0f8a4e]" : "text-[#b02039]"}`}>
+                      {feedback.correct ? "Recovered" : "Still unstable"}
+                    </div>
+                    <div className="mt-1 text-xs text-gray-700">+{momentum.instantXp} XP • Combo {momentum.combo}</div>
+                    {!feedback.correct && (
+                      <div className="mt-2 text-sm text-gray-700">
+                        Correct answer: <span className="font-semibold">{feedback.correctOption}</span>
+                      </div>
+                    )}
+                    {q.explanation ? (
+                      <div className="mt-3 text-sm leading-relaxed whitespace-pre-line text-gray-700">
+                        {q.explanation}
+                      </div>
+                    ) : (
+                      <div className="mt-3 text-sm text-gray-600">No explanation available yet.</div>
+                    )}
+                    <div className="mt-4">
+                      <QuestionActionBlock
+                        mode="review"
+                        questionId={q.id}
+                        subject={q.subject}
+                        subskill={q.topic || undefined}
+                        onExplain={generateAiExplanation}
+                        aiExplainLoading={aiExplainLoading}
+                        aiExplainError={aiExplainError}
+                        aiExplain={aiExplain}
+                        contextLine={`Due: ${currentQueueDueReason ? queueDueReasonLabel(currentQueueDueReason) : "Unresolved debt"} • Review reason: ${currentReviewReason ?? "new mistake"}`}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-[#d7e5fb] bg-[#f6faff] p-4 text-sm leading-relaxed text-gray-700">
+                    Pick the answer you can defend. This shell is a recovery check, not a speed drill.
+                  </div>
+                )}
+              </div>
+            </aside>
+          </section>
 
           <div className="fixed inset-x-0 bottom-0 z-40 border-t border-gray-200 bg-[rgba(248,251,255,0.98)] px-4 pb-[calc(env(safe-area-inset-bottom)+0.7rem)] pt-3 shadow-xl backdrop-blur md:hidden">
             <div className="mx-auto max-w-3xl rounded-2xl border border-white/90 bg-white/90 p-3">
@@ -1017,220 +1237,120 @@ export default function ReviewPage() {
       )}
 
       {!loading && !err && mode === "done" && (
-        <div className="grid gap-4">
-          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
-            <div className="grid gap-4 p-5 sm:p-6 lg:grid-cols-[1.08fr_0.92fr]">
-              <div>
+        <div className="grid gap-5">
+          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] shadow-xl">
+            <div className="p-5 sm:p-6">
+              <div className="flex flex-wrap items-center gap-2">
                 <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
                   Recovery complete
                 </div>
-                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">{outcomePill.text} state</h2>
-                <p className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
-                  Debt reduced. Route the next move while these mistakes are still visible.
-                </p>
-                <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
-                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
-                    Reviewed: <span className="font-semibold text-white">{analysis.reviewedCount}</span>
-                  </div>
-                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
-                    Accuracy: <span className="font-semibold text-white">{analysis.accuracyPct}%</span>
-                  </div>
-                </div>
+                <Pill text={outcomePill.text} tone={outcomePill.tone} />
               </div>
-              <div className="grid gap-3">
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Recovered / unstable</div>
-                  <div className="mt-2 text-3xl font-semibold tracking-tight text-white">
-                    {analysis.correctCount} / {analysis.incorrectCount}
-                  </div>
-                </div>
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Next move</div>
-                  <div className="mt-2 text-sm text-[#d2dbec]">{nextRecoveryRoute.note}</div>
-                </div>
+              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+                {recoveryVerdict.title}
+              </h2>
+              <p className="mt-3 max-w-2xl text-sm leading-relaxed text-[#d2dbec]">
+                {recoveryVerdict.note}
+              </p>
+              <div className="mt-3 rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-[#dce6f9]">
+                {exactNextStep}
               </div>
-            </div>
-          </section>
 
-          <Card
-            title="Recovery session complete"
-            subtitle="Debt reduced. Route the next move while the mistakes are still visible."
-            right={<Pill text={outcomePill.text} tone={outcomePill.tone} />}
-            accent
-            prominence="prominent"
-          >
-            <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-              <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <StatBox label="Reviewed" value={`${analysis.reviewedCount}`} hint="Items completed" />
-                  <StatBox label="Accuracy" value={`${analysis.accuracyPct}%`} hint="This review block" accent={analysis.accuracyPct >= 75} />
-                  <StatBox label="Recovered" value={`${analysis.correctCount}`} hint="Correct recoveries" accent={analysis.correctCount > 0} />
-                  <StatBox label="Still weak" value={`${analysis.incorrectCount}`} hint="Needs more repair" accent={analysis.incorrectCount > 0} />
+              <div className="mt-4 grid gap-2 sm:grid-cols-4">
+                <div className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-xs text-[#d8e5fc]">
+                  Debt before <span className="font-semibold text-white">{queueStartCount ?? "-"}</span>
+                </div>
+                <div className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-xs text-[#d8e5fc]">
+                  Debt after <span className="font-semibold text-white">{queueAfterCount ?? "-"}</span>
+                </div>
+                <div className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-xs text-[#d8e5fc]">
+                  Net <span className="font-semibold text-white">{debtDeltaLabel}</span>
+                </div>
+                <div className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-xs text-[#d8e5fc]">
+                  Accuracy <span className="font-semibold text-white">{analysis.accuracyPct}%</span>
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Next move</div>
-                <div className="mt-2 text-sm text-gray-700">{nextRecoveryRoute.note}</div>
-                <div className="mt-4 grid gap-3">
-                  <PrimaryButton href={nextRecoveryRoute.primaryHref}>{nextRecoveryRoute.primaryLabel}</PrimaryButton>
-                  <SecondaryButton href={nextRecoveryRoute.secondaryHref}>{nextRecoveryRoute.secondaryLabel}</SecondaryButton>
+              {studentState && (
+                <div className="mt-3 rounded-xl border border-white/20 bg-white/10 px-3 py-3 text-sm text-[#dce6f9]">
+                  Unified next command: <span className="font-semibold text-white">{studentState.recommendedAction.title}</span>
+                  <div className="mt-1 text-xs text-[#c8d4ed]">{studentState.recommendedAction.payoff}</div>
                 </div>
-              </div>
-            </div>
+              )}
 
-            <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                Debt impact from this block
+              <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
+                <PrimaryButton href={nextRecoveryRoute.primaryHref}>{nextRecoveryRoute.primaryLabel}</PrimaryButton>
+                <SecondaryButton href={nextRecoveryRoute.secondaryHref}>{nextRecoveryRoute.secondaryLabel}</SecondaryButton>
               </div>
-              <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
-                  Queue before: <span className="font-semibold text-black">{queueStartCount ?? "—"}</span>
-                </div>
-                <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
-                  Queue after: <span className="font-semibold text-black">{queueAfterCount ?? "—"}</span>
-                </div>
-                <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
-                  Debt cleared: <span className="font-semibold text-black">{debtDelta ?? "—"}</span>
-                </div>
+
+              <div className="mt-4 rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-xs text-[#d8e5fc]">
+                Reviewed <span className="font-semibold text-white">{analysis.reviewedCount}/{currentBlockCount}</span>
+                <span className="mx-2 text-[#89a4d1]">•</span>
+                Recovered <span className="font-semibold text-white">{analysis.correctCount}</span>
+                <span className="mx-2 text-[#89a4d1]">•</span>
+                Unstable <span className="font-semibold text-white">{analysis.incorrectCount}</span>
               </div>
+
+              {repairTopic && (
+                <div className="mt-4 rounded-xl border border-white/20 bg-white/10 px-3 py-3 text-sm text-[#dce6f9]">
+                  Repair target:{" "}
+                  <span className="font-semibold text-white">
+                    {repairTopic} ({repairSubject}
+                    {analysis.primaryRepairTarget && (
+                      <> • {Math.round(analysis.primaryRepairTarget.accuracy * 100)}% ({analysis.primaryRepairTarget.correct}/{analysis.primaryRepairTarget.total})</>
+                    )}
+                    )
+                  </span>
+                  <div className="mt-1 text-xs text-[#c8d4ed]">
+                    Secondary action is already routed into focused repair.
+                  </div>
+                </div>
+              )}
+
+              {failedTopicRoutes.length > 0 && (
+                <div className="mt-3 rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-xs text-[#d8e5fc]">
+                  Additional weak spots:{" "}
+                  <span className="font-semibold text-white">
+                    {failedTopicRoutes.map((topic) => `${topic.topic} (${Math.round(topic.accuracy * 100)}%)`).join(" • ")}
+                  </span>
+                </div>
+              )}
+
               {postSessionNotice && (
-                <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                   {postSessionNotice}
                 </div>
               )}
-            </div>
-            {repairTopic && (
-              <div className="mt-4 rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
-                  Primary repair target
-                </div>
-                <div className="mt-2 text-lg font-semibold text-black">{repairTopic}</div>
-                <div className="mt-2 text-sm text-gray-700">
-                  Subject: {repairSubject}
-                  {analysis.primaryRepairTarget && (
-                    <>
-                      {" "}• Accuracy in this session: {Math.round(analysis.primaryRepairTarget.accuracy * 100)}%
-                      {" "}({analysis.primaryRepairTarget.correct}/{analysis.primaryRepairTarget.total})
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
-            {failedTopicRoutes.length > 0 && (
-              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                  Repair routes from this block
-                </div>
-                <div className="mt-3 grid gap-3">
-                  {failedTopicRoutes.map((topic) => (
-                    <div key={`${topic.subject}-${topic.topic}`} className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                      <div className="text-sm font-semibold text-black">{topic.topic}</div>
-                      <div className="mt-1 text-xs text-gray-600">
-                        {topic.subject} • {Math.round(topic.accuracy * 100)}% ({topic.correct}/{topic.total})
-                      </div>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                        <SecondaryButton href={topic.practiceHref}>Practice this topic</SecondaryButton>
-                        <SecondaryButton href={topic.lessonHref}>Open lesson</SecondaryButton>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            {analysis.recoveredTopics.length > 0 && (
-              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                  Recovered cleanly
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {analysis.recoveredTopics.slice(0, 6).map((topic) => (
-                    <Pill
-                      key={topic.topic}
-                      text={`${topic.topic} • ${Math.round(topic.accuracy * 100)}%`}
-                      tone="success"
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-            {analysis.failedTopics.length > 1 && (
-              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                  Other weak topics from this session
-                </div>
-                <div className="mt-3 grid gap-2">
-                  {analysis.failedTopics.slice(1, 4).map((topic) => (
-                    <div key={topic.topic} className="text-sm text-gray-700">
-                      <span className="font-semibold">{topic.topic}</span> — {Math.round(topic.accuracy * 100)}% ({topic.correct}/{topic.total})
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
 
-            {sessionPayoff && identityStatus && identity && (
-              <SessionPayoffCard
-                payoff={sessionPayoff}
-                status={identityStatus}
-                streakDays={identity.streakDays}
-                mode="review"
-              />
-            )}
-
-            {identityStatus && identity && (
-              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                  Retention status
-                </div>
-                <div className="mt-2 text-sm text-gray-700">
-                  Division: <span className="font-semibold text-black">{identityStatus.division.label}</span>
-                  <span className="mx-2 text-gray-300">•</span>
-                  Level {identityStatus.level}
-                  <span className="mx-2 text-gray-300">•</span>
-                  Streak {identity.streakDays}d
-                </div>
-                {identityStatus.nextDivision && (
-                  <div className="mt-2 text-sm text-gray-700">
-                    {pointsToNextDivision(identity)} XP to {identityStatus.nextDivision.label}
-                  </div>
+              <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
+                {historySessionId ? (
+                  <SecondaryButton href={`/history?session=${encodeURIComponent(historySessionId)}`}>View in history</SecondaryButton>
+                ) : (
+                  <SecondaryButton href="/history">View history</SecondaryButton>
+                )}
+                <SecondaryButton href="/today">Back to Today</SecondaryButton>
+                {shareText && (
+                  <button
+                    onClick={copyShareResult}
+                    className="rounded-full border border-white/25 bg-white/10 px-3 py-1.5 font-semibold text-[#dce6f9] transition hover:bg-white/20"
+                  >
+                    {copiedShare ? "Copied result" : "Copy result"}
+                  </button>
+                )}
+                {sessionPayoff && identityStatus && identity && (
+                  <span className="rounded-full border border-white/25 bg-white/10 px-3 py-1.5 font-medium text-[#dce6f9]">
+                    {identityStatus.division.label} L{identityStatus.level} • {identity.streakDays}d • +{sessionPayoff.totalAwarded} XP
+                  </span>
                 )}
               </div>
-            )}
 
-            {shareText && (
-              <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                  Shareable result
+              {engagementNotice && (
+                <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+                  {engagementNotice}
                 </div>
-                <div className="mt-2 text-sm leading-relaxed text-gray-700">{shareText}</div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:max-w-xl">
-                  <PrimaryButton onClick={copyShareResult}>
-                    {copiedShare ? "Copied" : "Copy result"}
-                  </PrimaryButton>
-                  <SecondaryButton href="/leagues">Post in community</SecondaryButton>
-                </div>
-              </div>
-            )}
-
-            {engagementNotice && (
-              <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
-                {engagementNotice}
-              </div>
-            )}
-
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-              {historySessionId ? (
-                <PrimaryButton href={`/history?session=${encodeURIComponent(historySessionId)}`}>Reopen this result</PrimaryButton>
-              ) : (
-                <SecondaryButton href="/history">Open history</SecondaryButton>
               )}
-              <PrimaryButton onClick={loadDuePreview}>Check due again</PrimaryButton>
-              <SecondaryButton onClick={startSession}>Replay this recovery block</SecondaryButton>
-              <SecondaryButton href="/today">Back to Today</SecondaryButton>
-              <SecondaryButton href="/coach">Open coach</SecondaryButton>
             </div>
-          </Card>
+          </section>
         </div>
       )}
     </main>
