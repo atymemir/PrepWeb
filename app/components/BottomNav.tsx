@@ -14,7 +14,7 @@ const tabs: Tab[] = [
   { href: "/practice?subject=Reading", label: "Practice", match: "/practice" },
   { href: "/review", label: "Review", match: "/review" },
   { href: "/skills", label: "Skills", match: "/skills" },
-  { href: "/leagues", label: "Community", match: "/leagues" },
+  { href: "/coach", label: "Coach", match: "/coach" },
 ];
 
 export default function BottomNav() {

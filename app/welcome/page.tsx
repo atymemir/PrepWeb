@@ -6,16 +6,32 @@ import { useRouter } from "next/navigation";
 import { getSupabase } from "@/app/lib/supabase";
 import { getDurableEngagementSnapshot } from "@/app/lib/engagementDurable";
 import { errorMessage } from "@/app/lib/errors";
+import BrandWordmark from "@/app/components/BrandWordmark";
+import VisualAnchorPanel from "@/app/components/VisualAnchorPanel";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton } from "@/app/ui/ui";
 
 type SubjectTrack = "Reading" | "Math" | "Combined";
+type ExamType = "sat" | "ap" | "both";
+type StudyMode = "guided" | "free";
 
 type ProfileRow = {
   id: string;
   nickname: string | null;
   target_score: number | null;
   exam_date: string | null;
+  daily_study_hours: number | null;
+  weakest_area: string | null;
+  current_level: string | null;
 };
+
+type OnboardingPrefs = {
+  examType: ExamType;
+  targetOutcome: string;
+  studyMode: StudyMode;
+  completedAt?: string;
+};
+
+const ONBOARDING_KEY = "alga-prep-onboarding-v1";
 
 function isoToDateInput(iso: string | null): string {
   if (!iso) return "";
@@ -38,6 +54,22 @@ function clampTarget(raw: string): number {
   return Math.max(800, Math.min(1600, Math.round(n)));
 }
 
+function readPrefs(): OnboardingPrefs | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(ONBOARDING_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as OnboardingPrefs;
+  } catch {
+    return null;
+  }
+}
+
+function writePrefs(value: OnboardingPrefs) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(ONBOARDING_KEY, JSON.stringify(value));
+}
+
 export default function WelcomePage() {
   const router = useRouter();
 
@@ -49,12 +81,45 @@ export default function WelcomePage() {
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [totalSessions, setTotalSessions] = useState<number | null>(null);
 
+  const [examType, setExamType] = useState<ExamType>("sat");
   const [targetScore, setTargetScore] = useState("1400");
+  const [targetOutcome, setTargetOutcome] = useState("AP 5");
   const [examDate, setExamDate] = useState("");
+  const [studyMode, setStudyMode] = useState<StudyMode>("guided");
   const [track, setTrack] = useState<SubjectTrack>("Reading");
+  const [dailyHours, setDailyHours] = useState("2");
+  const [currentLevel, setCurrentLevel] = useState("Not sure yet");
+  const [weakArea, setWeakArea] = useState("");
 
   const nickname = useMemo(() => profile?.nickname?.trim() || "Student", [profile]);
   const isFirstSession = (totalSessions ?? 0) === 0;
+
+  const firstMission = useMemo(() => {
+    if (isFirstSession) {
+      return {
+        title: "Complete your first 10-question skill check",
+        note: "This creates your baseline and unlocks a precise daily plan.",
+        href: `/practice?subject=${track}&mode=trainer`,
+        label: "Start first skill check",
+      };
+    }
+
+    if (weakArea.trim()) {
+      return {
+        title: "Review your biggest score opportunity",
+        note: `${weakArea.trim()} is marked as a weak area. Run one focused set now.`,
+        href: `/practice?subject=${track}&subskill=${encodeURIComponent(weakArea.trim())}&revisit=1`,
+        label: "Practice weak area",
+      };
+    }
+
+    return {
+      title: "Follow your Today plan",
+      note: "Your plan is ready. Open Today and complete the top mission first.",
+      href: "/today",
+      label: "Open Today",
+    };
+  }, [isFirstSession, track, weakArea]);
 
   async function load() {
     setLoading(true);
@@ -73,7 +138,7 @@ export default function WelcomePage() {
 
       const { data: profileData, error: profileErr } = await supabase
         .from("profiles")
-        .select("id,nickname,target_score,exam_date")
+        .select("id,nickname,target_score,exam_date,daily_study_hours,weakest_area,current_level")
         .eq("id", userId)
         .single();
 
@@ -83,6 +148,16 @@ export default function WelcomePage() {
       setProfile(row);
       setTargetScore(String(row.target_score ?? 1400));
       setExamDate(isoToDateInput(row.exam_date));
+      setDailyHours(String(row.daily_study_hours ?? 2));
+      setCurrentLevel(row.current_level ?? "Not sure yet");
+      setWeakArea(row.weakest_area ?? "");
+
+      const prefs = readPrefs();
+      if (prefs) {
+        setExamType(prefs.examType);
+        setTargetOutcome(prefs.targetOutcome || "AP 5");
+        setStudyMode(prefs.studyMode);
+      }
 
       try {
         const snapshot = await getDurableEngagementSnapshot();
@@ -97,8 +172,8 @@ export default function WelcomePage() {
     }
   }
 
-  async function saveSetup() {
-    if (!profile) return;
+  async function saveSetup(): Promise<boolean> {
+    if (!profile) return false;
 
     setSaving(true);
     setErr(null);
@@ -109,26 +184,38 @@ export default function WelcomePage() {
       const payload = {
         target_score: clampTarget(targetScore),
         exam_date: dateInputToISO(examDate),
+        daily_study_hours: Math.max(0, Math.min(12, Math.round(Number(dailyHours) || 2))),
+        weakest_area: weakArea.trim() || null,
+        current_level: currentLevel,
       };
 
-      const { error } = await supabase
-        .from("profiles")
-        .update(payload)
-        .eq("id", profile.id);
+      const { error } = await supabase.from("profiles").update(payload).eq("id", profile.id);
 
       if (error) throw new Error(error.message);
 
-      setMsg("Setup saved.");
+      writePrefs({
+        examType,
+        targetOutcome: targetOutcome.trim() || "AP 5",
+        studyMode,
+        completedAt: new Date().toISOString(),
+      });
+
+      setMsg("Setup saved. Your Today plan is ready.");
       await load();
+      return true;
     } catch (e: unknown) {
       setErr(errorMessage(e, "Could not save setup."));
+      return false;
     } finally {
       setSaving(false);
     }
   }
 
-  function startPractice() {
-    router.push(`/practice?subject=${track}`);
+  async function saveAndOpenToday() {
+    const ok = await saveSetup();
+    if (ok) {
+      router.push("/today?onboarding=1");
+    }
   }
 
   useEffect(() => {
@@ -151,76 +238,141 @@ export default function WelcomePage() {
     <main className="min-h-screen">
       <PageHeader
         label="Onboarding"
-        title="Welcome to alga"
-        subtitle="Understand the loop, set your target, then launch your first serious block."
-        right={<Pill text={isFirstSession ? "First session" : "Quick reset"} tone="accent" />}
+        title="Welcome to alga prep"
+        subtitle="Set target and mode in two minutes, then launch the first decisive block."
+        right={<Pill text={isFirstSession ? "First setup" : "Update setup"} tone="accent" />}
       />
 
       {loading && (
-        <Card title="Loading…" subtitle="Preparing your onboarding">
-          <div className="text-sm text-gray-600">Please wait.</div>
+        <Card title="Loading onboarding" subtitle="Preparing your setup">
+          <div className="space-y-2">
+            <div className="state-skeleton h-3 w-2/3" />
+            <div className="state-skeleton h-3 w-1/2" />
+            <div className="state-skeleton h-24 w-full" />
+          </div>
         </Card>
       )}
 
       {!loading && err && (
-        <Card title="Error" subtitle="Onboarding could not load">
+        <Card title="Onboarding unavailable" subtitle="We could not load your setup right now.">
           <div className="text-sm text-red-600">{err}</div>
           <div className="mt-4 grid gap-3 sm:max-w-md sm:grid-cols-2">
             <PrimaryButton onClick={() => void load()}>Try again</PrimaryButton>
-            <SecondaryButton href="/today">Skip to Today</SecondaryButton>
+            <SecondaryButton href="/today">Open Today anyway</SecondaryButton>
           </div>
         </Card>
       )}
 
       {!loading && !err && (
         <div className="grid gap-4">
-          <section className="ink-surface overflow-hidden rounded-[30px] border border-[#22345e] shadow-xl">
+          <section className="premium-hero ink-surface overflow-hidden rounded-[30px] border border-[#22345e] shadow-xl">
             <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.2fr_0.8fr]">
               <div>
                 <div className="inline-flex items-center rounded-full border border-[#486399] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
-                  20-second model
+                  <BrandWordmark compact className="display-font font-bold text-[#bdd5ff]" /> launch
                 </div>
-                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">alga is your SAT execution system</h2>
+                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">
+                  Set baseline once, then attack with clarity
+                </h2>
                 <p className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
-                  Practice creates signal. Review clears debt. Skills and Lessons target weak zones. History proves movement. Coach keeps decisions sharp.
+                  One finished block unlocks your first strong recommendation in Today.
                 </p>
                 <div className="mt-5 grid gap-2 sm:grid-cols-2">
-                  <PrimaryButton onClick={startPractice}>Start first practice</PrimaryButton>
-                  <SecondaryButton href="/today">Open Today mission</SecondaryButton>
+                  <PrimaryButton onClick={() => void saveAndOpenToday()}>
+                    {saving ? "Saving..." : "Save setup and launch Today"}
+                  </PrimaryButton>
+                  <SecondaryButton href={firstMission.href}>{firstMission.label}</SecondaryButton>
                 </div>
               </div>
 
-              <div className="grid gap-2">
-                {[
-                  "Practice -> generate clear performance signal",
-                  "Review -> recover due mistakes before new volume",
-                  "Skills/Lessons -> repair one weak subtopic",
-                  "History/Coach -> verify movement and next decision",
-                ].map((line) => (
-                  <div key={line} className="rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs text-[#d9e6ff]">
-                    {line}
-                  </div>
-                ))}
-              </div>
+              <VisualAnchorPanel
+                variant="onboarding"
+                eyebrow="Launch outcome"
+                title={firstMission.title}
+                subtitle={firstMission.note}
+                metrics={[
+                  {
+                    label: "First route",
+                    value: firstMission.label,
+                    note: "Immediate action after setup",
+                    tone: "accent",
+                  },
+                  {
+                    label: "What unlocks",
+                    value: "Weak-skill priority",
+                    note: "Command view in Today",
+                    tone: "neutral",
+                  },
+                  {
+                    label: "What proves progress",
+                    value: "Payoff movement signal",
+                    note: "Comparable before/after",
+                    tone: "success",
+                  },
+                ]}
+                footer="Setup ends in a decisive first block."
+              />
             </div>
           </section>
 
-          <Card title="1-minute setup" subtitle={`Set only what matters, ${nickname}.`} accent>
-            <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
-              <div className="grid gap-3">
+          <Card title="Setup details" subtitle={`Only fields that change your first route, ${nickname}.`} accent>
+            <div className="grid gap-5 lg:grid-cols-2">
+              <div className="grid gap-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">Required now</div>
                 <div>
-                  <label className="text-sm font-semibold text-gray-700">Target score</label>
-                  <input
-                    className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none"
-                    value={targetScore}
-                    onChange={(e) => setTargetScore(e.target.value)}
-                    inputMode="numeric"
-                  />
-                  <div className="mt-1 text-xs text-gray-500">800-1600 goal (planning signal, not prediction).</div>
+                  <label className="text-sm font-semibold text-gray-700">Exam type</label>
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    {([
+                      { key: "sat", label: "SAT" },
+                      { key: "ap", label: "AP" },
+                      { key: "both", label: "Both" },
+                    ] as const).map((item) => {
+                      const active = examType === item.key;
+                      return (
+                        <button
+                          key={item.key}
+                          onClick={() => setExamType(item.key)}
+                          className={[
+                            "rounded-xl border px-3 py-3 text-sm font-semibold transition",
+                            active
+                              ? "border-[#0e1b34] bg-[#0e1b34] text-white"
+                              : "border-gray-300 bg-white text-gray-700 hover:border-gray-400",
+                          ].join(" ")}
+                        >
+                          {item.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
+                {examType !== "ap" && (
+                  <div>
+                    <label className="text-sm font-semibold text-gray-700">SAT target score</label>
+                    <input
+                      className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none"
+                      value={targetScore}
+                      onChange={(e) => setTargetScore(e.target.value)}
+                      inputMode="numeric"
+                    />
+                    <div className="mt-1 text-xs text-gray-500">Planning target only. Not a score prediction.</div>
+                  </div>
+                )}
+
+                {examType !== "sat" && (
+                  <div>
+                    <label className="text-sm font-semibold text-gray-700">AP target outcome</label>
+                    <input
+                      className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none"
+                      value={targetOutcome}
+                      onChange={(e) => setTargetOutcome(e.target.value)}
+                      placeholder="Example: AP Calculus BC 5"
+                    />
+                  </div>
+                )}
+
                 <div>
-                  <label className="text-sm font-semibold text-gray-700">SAT date</label>
+                  <label className="text-sm font-semibold text-gray-700">Exam date</label>
                   <input
                     className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none"
                     type="date"
@@ -229,58 +381,105 @@ export default function WelcomePage() {
                   />
                 </div>
 
-                <PrimaryButton onClick={() => void saveSetup()} disabled={saving}>
-                  {saving ? "Saving…" : "Save setup"}
-                </PrimaryButton>
-                {msg && <div className="text-xs text-green-700">{msg}</div>}
+                <div>
+                  <label className="text-sm font-semibold text-gray-700">First practice section</label>
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    {(["Reading", "Math", "Combined"] as const).map((option) => {
+                      const active = track === option;
+                      return (
+                        <button
+                          key={option}
+                          onClick={() => setTrack(option)}
+                          className={[
+                            "rounded-xl border px-3 py-3 text-sm font-semibold transition",
+                            active
+                              ? "border-[#0e1b34] bg-[#0e1b34] text-white"
+                              : "border-gray-300 bg-white text-gray-700 hover:border-gray-400",
+                          ].join(" ")}
+                        >
+                          {option}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
 
-              <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">Choose first track</div>
-                <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                  {(["Reading", "Math", "Combined"] as const).map((option) => {
-                    const active = track === option;
-                    return (
-                      <button
-                        key={option}
-                        onClick={() => setTrack(option)}
-                        className={[
-                          "rounded-xl border px-3 py-3 text-sm font-semibold transition",
-                          active
-                            ? "border-[#0e1b34] bg-[#0e1b34] text-white"
-                            : "border-gray-300 bg-white text-gray-700 hover:border-gray-400",
-                        ].join(" ")}
-                      >
-                        {option}
-                      </button>
-                    );
-                  })}
+              <div className="grid gap-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#6b7f9f]">Optional tuning</div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700">Current level</label>
+                  <select
+                    className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm"
+                    value={currentLevel}
+                    onChange={(e) => setCurrentLevel(e.target.value)}
+                  >
+                    <option>Not sure yet</option>
+                    <option>Early foundation</option>
+                    <option>Developing consistency</option>
+                    <option>Near target but inconsistent</option>
+                    <option>Final polishing</option>
+                  </select>
                 </div>
-                <div className="mt-3 text-xs text-gray-600">
-                  {track === "Combined"
-                    ? "Mixed block feels closer to test pressure."
-                    : `${track} block gives cleaner early signal.`}
+
+                <div>
+                  <label className="text-sm font-semibold text-gray-700">Preferred daily workload (hours)</label>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none"
+                    value={dailyHours}
+                    onChange={(e) => setDailyHours(e.target.value)}
+                    inputMode="numeric"
+                  />
                 </div>
-                <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                  <PrimaryButton onClick={startPractice}>Start first 12Q block</PrimaryButton>
-                  <SecondaryButton href="/today">Open Today mission</SecondaryButton>
+
+                <div>
+                  <label className="text-sm font-semibold text-gray-700">Weakest areas (if known)</label>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm outline-none"
+                    value={weakArea}
+                    onChange={(e) => setWeakArea(e.target.value)}
+                    placeholder="Example: linear equations, transitions, punctuation"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-sm font-semibold text-gray-700">Study style</label>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    {([
+                      { key: "guided", label: "Guided mode", note: "Follow Today recommendations." },
+                      { key: "free", label: "Free practice", note: "Choose sessions manually." },
+                    ] as const).map((item) => {
+                      const active = studyMode === item.key;
+                      return (
+                        <button
+                          key={item.key}
+                          onClick={() => setStudyMode(item.key)}
+                          className={[
+                            "rounded-xl border px-3 py-3 text-left text-sm font-semibold transition",
+                            active
+                              ? "border-[#0e1b34] bg-[#0e1b34] text-white"
+                              : "border-gray-300 bg-white text-gray-700 hover:border-gray-400",
+                          ].join(" ")}
+                        >
+                          <div>{item.label}</div>
+                          <div className={`mt-1 text-xs ${active ? "text-[#d2dbec]" : "text-gray-500"}`}>{item.note}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             </div>
+
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <PrimaryButton onClick={() => void saveAndOpenToday()} disabled={saving}>
+                {saving ? "Saving..." : "Save setup and launch Today"}
+              </PrimaryButton>
+              <SecondaryButton href={firstMission.href}>{firstMission.label}</SecondaryButton>
+            </div>
+
+            {msg ? <div className="mt-3 text-sm text-green-700">{msg}</div> : null}
           </Card>
-
-          <section className="rounded-2xl border border-gray-200 bg-white/92 p-4 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">Need product context first?</div>
-            <div className="mt-2 text-sm text-gray-700">Read the short product model, then come back and launch your first session.</div>
-            <div className="mt-3 grid gap-2 sm:max-w-md sm:grid-cols-2">
-              <SecondaryButton href="/how-it-works">How alga works</SecondaryButton>
-              <SecondaryButton href="/today">Skip onboarding</SecondaryButton>
-            </div>
-          </section>
-
-          <div className="text-xs text-gray-500">
-            Onboarding is intentionally short. The real product understanding comes from completing one full loop.
-          </div>
         </div>
       )}
     </main>

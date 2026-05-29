@@ -35,15 +35,63 @@ export function mathLessonToolContext(lesson: {
     );
   if (!looksMath) return null;
 
-  if (text.includes("linear") || text.includes("system")) {
+  if (text.includes("linear equations in one variable")) {
+    return {
+      formula: { name: "Linear solve pattern", formula: "ax + b = c  ->  x = (c - b) / a" },
+      calculatorTip: {
+        title: "Algebra-first check",
+        quickRule: "Solve symbolically first, then verify by substitution.",
+      },
+      fastMove: "Distribute carefully, collect x-terms, then isolate with balanced operations.",
+      algebraFasterWhen: "Coefficients are clean and sign control is the main risk.",
+    };
+  }
+
+  if (text.includes("linear inequalities")) {
+    return {
+      formula: { name: "Inequality flip rule", formula: "Multiply or divide by a negative  ->  flip inequality sign" },
+      calculatorTip: {
+        title: "Number-line verification",
+        quickRule: "Test one value from the proposed solution interval.",
+      },
+      fastMove: "Solve like an equation, then check whether the final step requires a sign flip.",
+      algebraFasterWhen: "Single-variable form with clear endpoint behavior.",
+    };
+  }
+
+  if (text.includes("linear equations in two variables")) {
     return {
       formula: { name: "Slope", formula: "m = (y2 - y1) / (x2 - x1)" },
+      calculatorTip: {
+        title: "Slope-intercept scan",
+        quickRule: "Convert to y = mx + b before interpreting rate and intercept.",
+      },
+      fastMove: "Read slope and intercept meaning before doing any arithmetic.",
+      algebraFasterWhen: "Question asks for rate, intercept, or whether a point satisfies the line.",
+    };
+  }
+
+  if (text.includes("systems of linear equations") || text.includes("system")) {
+    return {
+      formula: { name: "System intersection", formula: "Solve both equations simultaneously for one ordered pair" },
       calculatorTip: {
         title: "Graphing check for intersection",
         quickRule: "Use Desmos graph to verify candidate intersection quickly.",
       },
-      fastMove: "Convert both equations to slope-intercept form before solving.",
+      fastMove: "Choose elimination when coefficients align; substitution when one variable is isolated.",
       algebraFasterWhen: "Coefficients are small and elimination is one clean step.",
+    };
+  }
+
+  if (text.includes("functions and notation")) {
+    return {
+      formula: { name: "Function substitution", formula: "f(input) = replace every x in f(x) with input" },
+      calculatorTip: {
+        title: "Parentheses discipline",
+        quickRule: "When input is an expression, wrap it in parentheses everywhere.",
+      },
+      fastMove: "Say 'replace every x' before writing the first substitution line.",
+      algebraFasterWhen: "Expression structure is simple and direct substitution avoids graphing.",
     };
   }
 
@@ -59,6 +107,18 @@ export function mathLessonToolContext(lesson: {
     };
   }
 
+  if (text.includes("exponents") || text.includes("radicals")) {
+    return {
+      formula: { name: "Exponent rules", formula: "a^m * a^n = a^(m+n),  (a^m)^n = a^(mn),  a^m / a^n = a^(m-n)" },
+      calculatorTip: {
+        title: "Exact-form guardrail",
+        quickRule: "Avoid decimal approximations until the final step.",
+      },
+      fastMove: "Match bases first, then apply one exponent rule at a time.",
+      algebraFasterWhen: "Expressions can be simplified structurally before numeric evaluation.",
+    };
+  }
+
   if (text.includes("geometry") || text.includes("circle") || text.includes("triangle") || text.includes("trig")) {
     return {
       formula: { name: "Circle", formula: "(x - h)^2 + (y - k)^2 = r^2" },
@@ -68,6 +128,18 @@ export function mathLessonToolContext(lesson: {
       },
       fastMove: "Sketch the figure and label known values before any arithmetic.",
       algebraFasterWhen: "Ratios and special triangles simplify exactly.",
+    };
+  }
+
+  if (text.includes("data analysis and probability")) {
+    return {
+      formula: { name: "Probability", formula: "P(event) = favorable outcomes / total outcomes" },
+      calculatorTip: {
+        title: "Table/axis discipline",
+        quickRule: "Read labels and units before reading values.",
+      },
+      fastMove: "Name numerator and denominator out loud before calculating.",
+      algebraFasterWhen: "Question asks for direct probability, mean, or weighted count from visible data.",
     };
   }
 

@@ -1,14 +1,31 @@
 'use client';
 export const dynamic = 'force-dynamic';
 
-import Link from "next/link";
 import { useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { getSupabase } from "../lib/supabase";
 import { focusedLessonHref, focusedPracticeHref } from "../lib/mastery";
-import { replaySessionHref } from "../lib/studentState";
+import { replaySessionHref, sessionModeLabel } from "../lib/studentState";
+import { TodayPressureCompanion } from "../components/PageVisualCompanions";
+import { getSupabase } from "../lib/supabase";
 import { useStudentState } from "../lib/useStudentState";
-import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
+import { Card, PageHeader, PrimaryButton, SecondaryButton } from "../ui/ui";
+
+type ActionLaneId =
+  | "clear_debt"
+  | "attack_weak_skill"
+  | "replay_recent_weak_session"
+  | "open_repair_lesson";
+
+type ActionLane = {
+  id: ActionLaneId;
+  title: string;
+  whyNow: string;
+  payoff: string;
+  href: string;
+  cta: string;
+  priority: number;
+  order: number;
+};
 
 function daysUntil(iso: string | null): number | null {
   if (!iso) return null;
@@ -22,17 +39,41 @@ function daysUntil(iso: string | null): number | null {
 }
 
 function countdownText(days: number | null): string {
-  if (days === null) return "Set SAT date";
-  if (days < 0) return "Update date";
-  if (days === 0) return "SAT today";
-  if (days === 1) return "1 day left";
-  return `${days} days left`;
+  if (days === null) return "Set your exam date";
+  if (days < 0) return "Exam date passed";
+  if (days === 0) return "Exam day";
+  if (days === 1) return "1 day remaining";
+  return `${days} days remaining`;
 }
 
-function debtTone(count: number): "success" | "accent" | "danger" {
-  if (count === 0) return "success";
-  if (count <= 8) return "accent";
-  return "danger";
+function pressureLabel(pressure: "clear" | "light" | "moderate" | "heavy"): string {
+  if (pressure === "heavy") return "Heavy";
+  if (pressure === "moderate") return "Moderate";
+  if (pressure === "light") return "Light";
+  return "Clear";
+}
+
+function conciseReason(text: string): string {
+  const clean = text.trim();
+  if (!clean) return "Execute this now while this bottleneck is still active.";
+  const firstSentence = clean.split(". ")[0]?.trim() ?? clean;
+  if (!firstSentence) return clean;
+  return /[.!?]$/.test(firstSentence) ? firstSentence : `${firstSentence}.`;
+}
+
+function signedPct(value: number | null): string {
+  if (value === null) return "No delta";
+  if (value > 0) return `+${value}%`;
+  return `${value}%`;
+}
+
+function sessionSubjectLabel(subject: string | null): string {
+  if (subject === "Math" || subject === "Reading" || subject === "Combined") return subject;
+  return "Mixed";
+}
+
+function streakLabel(days: number): string {
+  return `${days} day${days === 1 ? "" : "s"} streak`;
 }
 
 export default function TodayPage() {
@@ -48,9 +89,100 @@ export default function TodayPage() {
 
   const daysLeft = useMemo(() => daysUntil(state?.profile.examDate ?? null), [state?.profile.examDate]);
   const subtitle = useMemo(() => {
-    if (!state) return "Loading your mission";
+    if (!state) return "Building your plan for today";
     return `${state.profile.nickname} • ${countdownText(daysLeft)}`;
   }, [daysLeft, state]);
+  const nowStatus = useMemo(() => {
+    if (!state?.engagement) return "No active ranked signal yet";
+    return `${state.engagement.divisionLabel} L${state.engagement.level} • ${streakLabel(state.engagement.streakDays)}`;
+  }, [state]);
+
+  const actionLanes = useMemo<ActionLane[]>(() => {
+    if (!state) return [];
+
+    const weakest = state.weakestSkill;
+    const latest = state.recentMovement.latest;
+    const topDebtTopic = state.reviewDebt.topTopics[0];
+    const recentDrop = state.recentMovement.biggestDrop;
+
+    const clearDebtLane: ActionLane = {
+      id: "clear_debt",
+      title: "Clear debt",
+      whyNow:
+        state.reviewDebt.dueCount > 0
+          ? `${state.reviewDebt.dueCount} review items are due (${pressureLabel(state.reviewDebt.pressure)} pressure).`
+          : "Review queue is clear.",
+      payoff:
+        state.reviewDebt.dueCount > 0
+          ? "Removes old misses so your next set gives cleaner data."
+          : "Keeps recall stable and catches slips early.",
+      href: "/review",
+      cta: state.reviewDebt.dueCount > 0 ? `Clear ${state.reviewDebt.blockSize} now` : "Open review",
+      priority: state.reviewDebt.dueCount > 0 ? 100 : 36,
+      order: 1,
+    };
+
+    const attackWeakSkillLane: ActionLane = {
+      id: "attack_weak_skill",
+      title: "Attack weak skill",
+      whyNow: weakest
+        ? `${weakest.subject} ${weakest.subskill} is at ${weakest.accuracyPct}% over ${weakest.attempts} attempts.`
+        : "No locked weak skill yet; run one focused set to create a target.",
+      payoff: weakest
+        ? "Raises your biggest score drag right now."
+        : "Creates the next clear weakness to work on.",
+      href: weakest
+        ? focusedPracticeHref(weakest.subject, weakest.subskill)
+        : "/practice?subject=Reading",
+      cta: weakest ? `Practice ${weakest.subskill}` : "Start focused set",
+      priority: weakest ? (state.reviewDebt.dueCount === 0 ? 92 : 74) : 26,
+      order: 2,
+    };
+
+    const replayRecentLane: ActionLane = {
+      id: "replay_recent_weak_session",
+      title: "Replay recent weak session",
+      whyNow: latest
+        ? recentDrop
+          ? `${sessionModeLabel(latest.mode)} ${latest.accuracyPct}% in ${sessionSubjectLabel(latest.subject)}. Biggest drop: ${recentDrop.topic} (${recentDrop.delta}%).`
+          : `${sessionModeLabel(latest.mode)} ${latest.accuracyPct}% in ${sessionSubjectLabel(latest.subject)}.`
+        : "No recent session to replay yet.",
+      payoff: latest
+        ? "Gives before/after proof before changing route."
+        : "Creates your first baseline to compare against.",
+      href: latest ? replaySessionHref(latest) : "/history",
+      cta: latest ? "Replay session" : "Open history",
+      priority: latest
+        ? state.recentMovement.accuracyDelta !== null && state.recentMovement.accuracyDelta < 0
+          ? 84
+          : 56
+        : 18,
+      order: 3,
+    };
+
+    const openLessonLane: ActionLane = {
+      id: "open_repair_lesson",
+      title: "Open repair lesson",
+      whyNow: weakest
+        ? `Patch ${weakest.subskill} before the next retry block.`
+        : topDebtTopic
+        ? `Repair ${topDebtTopic.subject} ${topDebtTopic.topic} before it piles up again.`
+        : "Open one lesson to sharpen technique before volume.",
+      payoff: "Turns weakness into a direct fix plan.",
+      href: weakest ? focusedLessonHref(weakest.subskill) : "/lessons",
+      cta: weakest ? `Open ${weakest.subskill} lesson` : "Open lessons",
+      priority: weakest ? 48 : 22,
+      order: 4,
+    };
+
+    return [clearDebtLane, attackWeakSkillLane, replayRecentLane, openLessonLane].sort((a, b) => {
+      if (a.priority !== b.priority) return b.priority - a.priority;
+      return a.order - b.order;
+    });
+  }, [state]);
+
+  const primaryLane = actionLanes[0] ?? null;
+  const secondaryLanes = actionLanes.slice(1);
 
   async function logout() {
     try {
@@ -69,27 +201,28 @@ export default function TodayPage() {
         title="Today"
         subtitle={subtitle}
         right={
-          <button
-            onClick={logout}
-            className="text-sm font-semibold text-gray-600 hover:text-black underline"
-          >
+          <button onClick={logout} className="text-sm font-semibold text-gray-600 hover:text-black underline">
             Logout
           </button>
         }
       />
 
       {loading && (
-        <Card title="Loading…" subtitle="Syncing your student state">
-          <div className="text-sm text-gray-600">Please wait.</div>
+        <Card title="Loading your plan" subtitle="Syncing your latest practice and review data">
+          <div className="space-y-2">
+            <div className="state-skeleton h-3 w-2/3" />
+            <div className="state-skeleton h-3 w-1/2" />
+            <div className="state-skeleton h-28 w-full" />
+          </div>
         </Card>
       )}
 
       {!loading && error && (
-        <Card title="Error" subtitle="Today could not load">
+        <Card title="Today is unavailable" subtitle="We could not load your plan right now.">
           <div className="text-sm text-red-600">{error}</div>
           <div className="mt-4 grid gap-3">
             <PrimaryButton onClick={() => void refresh()}>Try again</PrimaryButton>
-            <SecondaryButton href="/profile">Profile</SecondaryButton>
+            <SecondaryButton href="/profile">Open profile</SecondaryButton>
           </div>
         </Card>
       )}
@@ -97,168 +230,132 @@ export default function TodayPage() {
       {!loading && !error && state && (
         <div className="grid gap-4">
           <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] shadow-xl">
-            <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.18fr_0.82fr]">
+            <div className="grid gap-6 p-5 sm:p-6 lg:grid-cols-[1.15fr_0.85fr]">
               <div>
                 <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
-                  Today&apos;s command
+                  Mission
                 </div>
                 <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
                   {state.recommendedAction.title}
                 </h2>
                 <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#d2dbec]">
-                  {state.recommendedAction.reason}
+                  Why now: {conciseReason(state.recommendedAction.reason)}
                 </p>
-                <div className="mt-2 text-xs text-[#b8c8e6]">{state.recommendedAction.payoff}</div>
-                <div className="mt-5 grid max-w-xl gap-3 sm:grid-cols-2">
-                  <PrimaryButton href={state.recommendedAction.primaryHref}>
-                    {state.recommendedAction.primaryLabel}
-                  </PrimaryButton>
-                  <SecondaryButton href={state.recommendedAction.secondaryHref}>
-                    {state.recommendedAction.secondaryLabel}
-                  </SecondaryButton>
+                <div className="mt-2 text-xs text-[#b8c8e6]">If you do this now: {state.recommendedAction.payoff}</div>
+
+                <div className="mt-5 max-w-sm">
+                  <PrimaryButton href={state.recommendedAction.primaryHref}>{state.recommendedAction.primaryLabel}</PrimaryButton>
                 </div>
               </div>
 
-              <div className="grid gap-3">
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Review debt</div>
-                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{state.reviewDebt.dueCount}</div>
-                  <div className="mt-1 text-xs text-[#c5d1e8]">{state.reviewDebt.pressure} pressure</div>
+              <div className="rounded-2xl border border-white/20 bg-white/10 p-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Where you are now</div>
+                <div className="mt-2 text-xl font-semibold text-white">{countdownText(daysLeft)}</div>
+                <div className="mt-1 text-sm text-[#d2dbec]">{nowStatus}</div>
+                <div className="mt-4 border-t border-white/15 pt-3 text-xs text-[#c5d1e8]">
+                  Plan: {state.profile.planLabel} · Review pressure {pressureLabel(state.reviewDebt.pressure)}
                 </div>
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Weakest active skill</div>
-                  <div className="mt-1 text-base font-semibold text-white">
-                    {state.weakestSkill ? state.weakestSkill.subskill : "Not established"}
-                  </div>
-                  <div className="mt-1 text-xs text-[#c5d1e8]">
-                    {state.weakestSkill
-                      ? `${state.weakestSkill.subject} • ${state.weakestSkill.accuracyPct}% • ${state.weakestSkill.attempts} attempts`
-                      : "Run one block to establish priority."}
-                  </div>
-                </div>
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Recent movement</div>
-                  <div className="mt-1 text-sm text-[#d2dbec]">{state.historyProof.lastMovementText}</div>
+                <div className="mt-3 text-xs text-[#c7d7f3]">
+                  Active target: {state.weakestSkill ? `${state.weakestSkill.subject} ${state.weakestSkill.subskill}` : "Generate first weak target"}
                 </div>
               </div>
+            </div>
+
+            <div className="border-t border-white/10 px-5 py-5 sm:px-6">
+              <TodayPressureCompanion
+                pressure={state.reviewDebt.pressure}
+                dueCount={state.reviewDebt.dueCount}
+                weakAccuracy={state.weakestSkill?.accuracyPct ?? null}
+                movementDelta={state.recentMovement.accuracyDelta}
+              />
             </div>
           </section>
 
-          <Card title="Student state snapshot" subtitle="Where you are now, what is weak, and what changed." accent>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Mastered</div>
-                <div className="mt-2 text-2xl font-semibold text-[#0f172a]">{state.masteryDistribution.Mastered}</div>
-              </div>
-              <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Growing</div>
-                <div className="mt-2 text-2xl font-semibold text-[#0f172a]">{state.masteryDistribution.Growing}</div>
-              </div>
-              <div className="rounded-2xl border border-[#f5b8c4] bg-[#fff5f7] p-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#8f1d35]">Unstable</div>
-                <div className="mt-2 text-2xl font-semibold text-[#8f1d35]">{state.masteryDistribution.Unstable}</div>
-              </div>
-              <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Low-signal rows</div>
-                <div className="mt-2 text-2xl font-semibold text-[#0f172a]">{state.lowSignalCount}</div>
-              </div>
-            </div>
-
-            <div className="mt-4 flex flex-wrap gap-2 text-xs">
-              <Pill text={`Debt ${state.reviewDebt.dueCount}`} tone={debtTone(state.reviewDebt.dueCount)} />
-              <Pill text={`Mode ${state.recommendedPracticeMode}`} tone="accent" />
-              <Pill text={`Plan ${state.profile.planLabel}`} tone="neutral" />
-              {state.engagement && (
-                <Pill text={`${state.engagement.divisionLabel} L${state.engagement.level} • ${state.engagement.streakDays}d streak`} tone="neutral" />
-              )}
-            </div>
-          </Card>
-
-          <Card title="Action lanes" subtitle="Choose one lane and execute now.">
-            <div className="grid gap-3 lg:grid-cols-4">
-              <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-sm font-semibold text-black">Recover debt</div>
-                <div className="mt-2 text-xs text-gray-600">
-                  {state.reviewDebt.dueCount > 0
-                    ? `${state.reviewDebt.dueCount} due now. Clear a block before new content.`
-                    : "Debt is clear. Keep it that way."}
-                </div>
-                <div className="mt-3">
-                  <SecondaryButton href="/review">Open review</SecondaryButton>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-sm font-semibold text-black">Attack weak skill</div>
-                <div className="mt-2 text-xs text-gray-600">
-                  {state.weakestSkill
-                    ? `${state.weakestSkill.subskill} • ${state.weakestSkill.accuracyPct}% • ${state.weakestSkill.confidence} confidence`
-                    : "No weak skill yet. Generate one more block."}
-                </div>
-                <div className="mt-3">
-                  <SecondaryButton
-                    href={
-                      state.weakestSkill
-                        ? focusedPracticeHref(state.weakestSkill.subject, state.weakestSkill.subskill, true)
-                        : "/practice?subject=Reading"
-                    }
-                  >
-                    Drill now
-                  </SecondaryButton>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-sm font-semibold text-black">Replay recent session</div>
-                <div className="mt-2 text-xs text-gray-600">{state.historyProof.lastSessionLabel}</div>
-                <div className="mt-3">
-                  {state.recentMovement.latest ? (
-                    <SecondaryButton href={replaySessionHref(state.recentMovement.latest)}>Replay shape</SecondaryButton>
-                  ) : (
-                    <SecondaryButton href="/history">Open history</SecondaryButton>
-                  )}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-sm font-semibold text-black">Repair with lesson</div>
-                <div className="mt-2 text-xs text-gray-600">
-                  {state.weakestSkill
-                    ? `Bridge into ${state.weakestSkill.subskill}, then return to retry.`
-                    : "Open lesson library and pick one high-value repair playbook."}
-                </div>
-                <div className="mt-3">
-                  <SecondaryButton
-                    href={
-                      state.weakestSkill
-                        ? focusedLessonHref(state.weakestSkill.subskill)
-                        : "/lessons"
-                    }
-                  >
-                    Open lesson
-                  </SecondaryButton>
-                </div>
-              </div>
-            </div>
-          </Card>
-
-          <section className="rounded-2xl border border-gray-200 bg-white/92 p-4 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">Coach pulse</div>
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              {state.contextualMessages.today.slice(0, 4).map((message) => (
-                <div key={message.id} className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-700">
-                  {message.text}
-                  {message.actionHref && message.actionLabel && (
-                    <div className="mt-2">
-                      <Link href={message.actionHref} className="text-xs font-semibold text-[#004aad] underline">
-                        {message.actionLabel}
-                      </Link>
+          <Card title="Evidence" subtitle="What is weak or problematic right now." accent prominence="prominent">
+            <div className="grid gap-4">
+              <div className="rounded-2xl border border-[#cfe2ff] bg-[#f7fbff] p-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">Weakest active skill</div>
+                {state.weakestSkill ? (
+                  <>
+                    <div className="mt-2 text-2xl font-semibold tracking-tight text-[#0e1b34]">
+                      {state.weakestSkill.subskill} · {state.weakestSkill.accuracyPct}%
                     </div>
+                    <div className="mt-1 text-sm text-[#4d607f]">
+                      {state.weakestSkill.subject} · {state.weakestSkill.attempts} attempts · {state.weakestSkill.mastery} mastery ·{" "}
+                      {state.weakestSkill.movement} movement
+                    </div>
+                  </>
+                ) : (
+                  <div className="mt-2 text-sm text-[#4d607f]">
+                    No active weak skill yet. One focused set will create your first target.
+                  </div>
+                )}
+              </div>
+
+              <div className="grid gap-3 lg:grid-cols-2">
+                <div className="rounded-2xl border border-gray-200 bg-white p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#516483]">Review debt pressure</div>
+                  <div className="mt-2 text-2xl font-semibold tracking-tight text-[#0f172a]">{state.reviewDebt.dueCount}</div>
+                  <div className="mt-1 text-sm text-[#4d607f]">
+                    {pressureLabel(state.reviewDebt.pressure)} pressure
+                    {state.reviewDebt.topTopics[0]
+                      ? ` · Top pileup: ${state.reviewDebt.topTopics[0].subject} ${state.reviewDebt.topTopics[0].topic} (${state.reviewDebt.topTopics[0].count})`
+                      : ""}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-gray-200 bg-white p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#516483]">Recent movement</div>
+                  {state.recentMovement.latest ? (
+                    <>
+                      <div className="mt-2 text-base font-semibold text-[#0f172a]">
+                        {signedPct(state.recentMovement.accuracyDelta)} vs comparable block
+                      </div>
+                      <div className="mt-1 text-sm text-[#4d607f]">
+                        {sessionModeLabel(state.recentMovement.latest.mode)} · {sessionSubjectLabel(state.recentMovement.latest.subject)} ·{" "}
+                        {state.recentMovement.latest.accuracyPct}% ({state.recentMovement.latest.correctCount}/
+                        {state.recentMovement.latest.answeredCount})
+                        {state.recentMovement.biggestDrop
+                          ? ` · Drop: ${state.recentMovement.biggestDrop.topic} (${state.recentMovement.biggestDrop.delta}%)`
+                          : ""}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="mt-2 text-sm text-[#4d607f]">No recent movement yet. Complete one session to create proof.</div>
                   )}
                 </div>
-              ))}
+              </div>
             </div>
-          </section>
+          </Card>
+
+          <Card title="Action lanes" subtitle="What to do now, in order.">
+            <div className="space-y-3">
+              {primaryLane && (
+                <div className="rounded-2xl border border-[#a9c9fa] bg-[linear-gradient(145deg,#edf5ff,#f8fbff)] p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">Primary lane</div>
+                  <div className="mt-2 text-xl font-semibold tracking-tight text-[#0e1b34]">{primaryLane.title}</div>
+                  <div className="mt-1 text-sm text-[#4d607f]">{primaryLane.whyNow}</div>
+                  <div className="mt-1 text-xs text-[#617394]">{primaryLane.payoff}</div>
+                  <div className="mt-4 max-w-sm">
+                    <PrimaryButton href={primaryLane.href}>{primaryLane.cta}</PrimaryButton>
+                  </div>
+                </div>
+              )}
+
+              <div className="divide-y divide-gray-200 rounded-2xl border border-gray-200 bg-white">
+                {secondaryLanes.map((lane) => (
+                  <div key={lane.id} className="grid gap-3 p-4 sm:grid-cols-[1fr_220px] sm:items-center">
+                    <div>
+                      <div className="text-sm font-semibold text-[#0f172a]">{lane.title}</div>
+                      <div className="mt-1 text-sm text-[#4d607f]">{lane.whyNow}</div>
+                      <div className="mt-1 text-xs text-[#617394]">{lane.payoff}</div>
+                    </div>
+                    <SecondaryButton href={lane.href}>{lane.cta}</SecondaryButton>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </Card>
         </div>
       )}
     </main>

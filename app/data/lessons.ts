@@ -4,6 +4,14 @@ export type Lesson = {
   domain: string;
   title: string;
   summary: string;
+  repairPlaybook?: {
+    tests: string;
+    trap: string;
+    decisionRule: string;
+    fastMove: string;
+    drillNow: string;
+    retryPayoff: string;
+  };
   keyPoints: string[];
   commonTraps: string[];
   miniExample: { prompt: string; answer: string };
@@ -25,6 +33,14 @@ export const LESSONS: Lesson[] = [
     domain: "Craft and Structure",
     title: "Words in Context",
     summary: "Choose the meaning created by the sentence, not the fanciest dictionary meaning.",
+    repairPlaybook: {
+      tests: "Infer in-sentence meaning from logic, syntax, and tone instead of dictionary memory.",
+      trap: "Choosing the familiar definition while ignoring what the sentence is doing.",
+      decisionRule: "If the choice cannot replace the blank with exact logic, cut it.",
+      fastMove: "Predict a plain replacement word before checking choices.",
+      drillNow: "Run one blank where contrast words force the meaning.",
+      retryPayoff: "Fewer vocab traps and faster eliminations on Reading.",
+    },
     keyPoints: [
       "Cover the answer choices and name the role the missing word plays.",
       "Use nearby verbs, objects, and contrast words as hard evidence.",
@@ -72,6 +88,14 @@ export const LESSONS: Lesson[] = [
     domain: "Craft and Structure",
     title: "Text Structure and Purpose",
     summary: "Track why each sentence exists: claim, evidence, contrast, example, concession, or result.",
+    repairPlaybook: {
+      tests: "Identify each sentence job in the argument, not just the topic.",
+      trap: "Picking a true detail answer that never states purpose.",
+      decisionRule: "If an option names content but not function, eliminate it.",
+      fastMove: "Label the target sentence as claim, evidence, contrast, or result in 2 seconds.",
+      drillNow: "Classify one two-sentence pair and state sentence 2's function.",
+      retryPayoff: "Cleaner structure and purpose picks under time pressure.",
+    },
     keyPoints: [
       "Label each sentence by job, not topic.",
       "Purpose questions usually ask what the author is doing, not what the passage is about.",
@@ -119,6 +143,14 @@ export const LESSONS: Lesson[] = [
     domain: "Craft and Structure",
     title: "Cross-Text Connections",
     summary: "Compare the two authors' claims, assumptions, and likely reactions without blending them.",
+    repairPlaybook: {
+      tests: "Track each author's claim and infer the exact relationship between them.",
+      trap: "Blending both texts into one position or overstating disagreement.",
+      decisionRule: "If the reaction choice cannot be supported by Text 2's own claim, eliminate it.",
+      fastMove: "Write T1 claim, T2 claim, then tag relation: support, challenge, qualify, or extend.",
+      drillNow: "Run one two-text pair and write a five-word T2 -> T1 relation.",
+      retryPayoff: "Faster two-text decisions with cleaner claim separation.",
+    },
     keyPoints: [
       "Read Text 1 for position, then Text 2 for position.",
       "Write a short relation: agrees, disagrees, qualifies, or extends.",
@@ -166,6 +198,14 @@ export const LESSONS: Lesson[] = [
     domain: "Information and Ideas",
     title: "Central Ideas and Details",
     summary: "Separate the passage's main point from details that merely support it.",
+    repairPlaybook: {
+      tests: "Distinguish the passage-wide main idea from local supporting details.",
+      trap: "Choosing a true sentence detail as if it were the central idea.",
+      decisionRule: "If a choice does not cover the whole passage scope, eliminate it.",
+      fastMove: "Summarize the passage in one sentence before opening options.",
+      drillNow: "Write one main-idea sentence from a short passage summary.",
+      retryPayoff: "Cleaner main-idea picks and fewer narrow-scope errors.",
+    },
     keyPoints: [
       "The central idea must cover the whole passage, not one sentence.",
       "Details questions require exact support, not a reasonable guess.",
@@ -213,6 +253,14 @@ export const LESSONS: Lesson[] = [
     domain: "Information and Ideas",
     title: "Inferences",
     summary: "Pick what must be true from the text, not what could be interesting or likely in real life.",
+    repairPlaybook: {
+      tests: "Choose only claims forced by the passage evidence.",
+      trap: "Adding an outside assumption that feels reasonable.",
+      decisionRule: "If one line from the text cannot prove it, eliminate it.",
+      fastMove: "Run a strict must-be-true check on every remaining choice.",
+      drillNow: "Take one evidence sentence and rewrite only what it guarantees.",
+      retryPayoff: "Fewer speculative misses and tighter evidence control.",
+    },
     keyPoints: [
       "Inference means supported extension, not speculation.",
       "Strong answers usually restate evidence in a new form.",
@@ -260,6 +308,14 @@ export const LESSONS: Lesson[] = [
     domain: "Information and Ideas",
     title: "Command of Evidence",
     summary: "Match claims to the exact data, quote, or detail that proves them.",
+    repairPlaybook: {
+      tests: "Match claim verbs to evidence that proves the same relationship.",
+      trap: "Choosing evidence on the same topic that proves a different claim.",
+      decisionRule: "If evidence does not prove every part of the claim, reject it.",
+      fastMove: "Underline the claim verb, then find the data with the same direction.",
+      drillNow: "Pair one claim with the single line or data point that fully proves it.",
+      retryPayoff: "More accurate evidence pairing and fewer graph misreads.",
+    },
     keyPoints: [
       "Evidence answers must support the claim directly.",
       "Data questions require direction and size, not just topic match.",
@@ -307,6 +363,14 @@ export const LESSONS: Lesson[] = [
     domain: "Standard English Conventions",
     title: "Boundaries",
     summary: "Control sentence joins: complete thought, fragment, comma splice, colon, dash, and semicolon.",
+    repairPlaybook: {
+      tests: "Diagnose whether each side of punctuation is complete or fragment.",
+      trap: "Punctuating by pause or style instead of grammar structure.",
+      decisionRule: "Only use semicolon/period when both sides are complete thoughts.",
+      fastMove: "Bracket left and right chunks, then label complete or fragment.",
+      drillNow: "Classify one punctuation split and pick the legal join.",
+      retryPayoff: "Instant comma-splice and fragment eliminations on Writing.",
+    },
     keyPoints: [
       "A complete thought has a subject and a working verb.",
       "Semicolons join two complete thoughts.",
@@ -319,7 +383,7 @@ export const LESSONS: Lesson[] = [
     ],
     miniExample: {
       prompt: "The team revised the design ___ the first prototype had failed.",
-      answer: "Because works if the second part explains the reason.",
+      answer: "Use because if the second clause gives the reason for revising.",
     },
     repairPattern: [
       "Bracket the words before and after the punctuation.",
@@ -353,6 +417,14 @@ export const LESSONS: Lesson[] = [
     domain: "Standard English Conventions",
     title: "Form, Structure, and Sense",
     summary: "Make the sentence grammatically complete and logically smooth without changing its meaning.",
+    repairPlaybook: {
+      tests: "Maintain grammatical correctness while preserving the sentence's intended meaning.",
+      trap: "Choosing what sounds natural instead of checking structure and agreement.",
+      decisionRule: "If the subject, tense, or modifier link breaks, reject the choice immediately.",
+      fastMove: "Strip extra phrases and test only the core subject + verb frame first.",
+      drillNow: "Repair one dangling modifier and one agreement sentence.",
+      retryPayoff: "Fewer grammar-by-ear misses and faster structural checks.",
+    },
     keyPoints: [
       "Check subject-verb agreement first.",
       "Match pronouns to clear nouns and correct number.",
@@ -399,6 +471,14 @@ export const LESSONS: Lesson[] = [
     domain: "Expression of Ideas",
     title: "Transitions",
     summary: "Choose the connector that matches the relationship between two ideas.",
+    repairPlaybook: {
+      tests: "Identify the logical relationship between adjacent ideas and match the transition.",
+      trap: "Picking transitions by tone or style instead of logic.",
+      decisionRule: "If the connector does not match relation type, eliminate it regardless of wording quality.",
+      fastMove: "Label relation first: contrast, cause, addition, result, or example.",
+      drillNow: "Classify one sentence pair and choose only by relation label.",
+      retryPayoff: "Quicker transition eliminations with fewer logic mismatches.",
+    },
     keyPoints: [
       "Identify the relationship before checking choices: contrast, cause, example, addition, result.",
       "Transitions are logic words, not style words.",
@@ -445,6 +525,14 @@ export const LESSONS: Lesson[] = [
     domain: "Expression of Ideas",
     title: "Rhetorical Synthesis",
     summary: "Use the notes to fulfill the stated goal, not to summarize everything.",
+    repairPlaybook: {
+      tests: "Select only note details that satisfy the exact rhetorical goal.",
+      trap: "Writing a true sentence that ignores the task verb.",
+      decisionRule: "If a detail does not serve the goal directly, cut it.",
+      fastMove: "Underline the goal verb before reading notes or options.",
+      drillNow: "Use one notes set and keep only facts that satisfy a single goal.",
+      retryPayoff: "Higher synthesis precision and fewer overloaded answers.",
+    },
     keyPoints: [
       "Read the goal before the notes.",
       "Select only notes that serve that goal.",
@@ -492,6 +580,14 @@ export const LESSONS: Lesson[] = [
     domain: "Algebra",
     title: "Linear Equations in One Variable",
     summary: "Isolate the variable cleanly; most SAT traps are distribution, signs, and fractions.",
+    repairPlaybook: {
+      tests: "Execute linear-equation balance with clean distribution and sign control.",
+      trap: "Dropping signs during distribution or moving terms.",
+      decisionRule: "If x appears on both sides, collect terms before dividing.",
+      fastMove: "Draw a vertical equals line and mirror each operation step by step.",
+      drillNow: "Solve one equation with a negative distribution and verify by substitution.",
+      retryPayoff: "Higher algebra hit rate with fewer avoidable sign errors.",
+    },
     keyPoints: [
       "Distribute before combining like terms.",
       "Clear fractions only if it makes the equation simpler.",
@@ -538,6 +634,14 @@ export const LESSONS: Lesson[] = [
     domain: "Algebra",
     title: "Linear Equations in Two Variables",
     summary: "Read slope, intercept, and point meaning from the equation before calculating.",
+    repairPlaybook: {
+      tests: "Interpret slope, intercept, and solution points in context.",
+      trap: "Confusing intercepts or reading slope without rearranging form.",
+      decisionRule: "If asked for rate, use slope; if asked for start, use intercept.",
+      fastMove: "Convert to y = mx + b before interpretation.",
+      drillNow: "Translate one line equation into rate and starting value in words.",
+      retryPayoff: "Stronger equation interpretation and fewer unit mistakes.",
+    },
     keyPoints: [
       "Slope is rate of change.",
       "The y-intercept is the value when x = 0.",
@@ -584,6 +688,14 @@ export const LESSONS: Lesson[] = [
     domain: "Algebra",
     title: "Systems of Linear Equations",
     summary: "Use elimination, substitution, or graphing based on which move is cleanest.",
+    repairPlaybook: {
+      tests: "Find the value pair that satisfies both equations simultaneously.",
+      trap: "Solving one equation correctly but never verifying in the second.",
+      decisionRule: "If one variable is isolated, substitute; if coefficients align, eliminate.",
+      fastMove: "Pick method before computing to avoid unnecessary steps.",
+      drillNow: "Solve one two-equation system and verify the pair in both originals.",
+      retryPayoff: "Cleaner method choice and fewer arithmetic or verification misses.",
+    },
     keyPoints: [
       "A solution is the point that satisfies both equations.",
       "Elimination is fastest when coefficients already match or nearly match.",
@@ -630,6 +742,14 @@ export const LESSONS: Lesson[] = [
     domain: "Algebra",
     title: "Linear Inequalities",
     summary: "Solve like equations, but protect the inequality direction and graph meaning.",
+    repairPlaybook: {
+      tests: "Solve inequality expressions while preserving correct direction and endpoint meaning.",
+      trap: "Forgetting to flip the sign after dividing by a negative.",
+      decisionRule: "Flip only when multiply/divide by negative; never on add/subtract.",
+      fastMove: "Write FLIP above the line before any negative division step.",
+      drillNow: "Solve one negative-coefficient inequality and confirm with a test value.",
+      retryPayoff: "Fewer direction errors and more reliable graph answers.",
+    },
     keyPoints: [
       "Flip the inequality only when multiplying or dividing by a negative.",
       "Open circles exclude endpoints; closed circles include endpoints.",
@@ -676,6 +796,14 @@ export const LESSONS: Lesson[] = [
     domain: "Advanced Math",
     title: "Functions and Notation",
     summary: "Treat function notation as input-output instructions, not as decoration.",
+    repairPlaybook: {
+      tests: "Substitute the full input correctly in function expressions.",
+      trap: "Replacing only one x or multiplying by the input instead of substituting.",
+      decisionRule: "If input is an expression, put it in parentheses everywhere x appears.",
+      fastMove: "Say 'replace every x' before writing the first step.",
+      drillNow: "Evaluate one function with an expression input like a + 3.",
+      retryPayoff: "Fewer notation errors and faster function execution.",
+    },
     keyPoints: [
       "f(3) means the output when x = 3.",
       "f(x + 2) means replace every x with x + 2.",
@@ -722,6 +850,14 @@ export const LESSONS: Lesson[] = [
     domain: "Advanced Math",
     title: "Quadratics and Polynomials",
     summary: "Look for structure first: factoring, roots, vertex, intercepts, or equivalent forms.",
+    repairPlaybook: {
+      tests: "Choose the quadratic form that exposes the requested feature fastest.",
+      trap: "Using a heavy method when factoring or form-switching is faster.",
+      decisionRule: "If question asks roots, move toward factored form first.",
+      fastMove: "Check for factorability before formula or graph.",
+      drillNow: "Factor one quadratic and map factors directly to roots.",
+      retryPayoff: "Faster root/vertex decisions with less algebra overhead.",
+    },
     keyPoints: [
       "Factored form reveals roots.",
       "Vertex form reveals maximum or minimum.",
@@ -768,6 +904,14 @@ export const LESSONS: Lesson[] = [
     domain: "Advanced Math",
     title: "Exponents and Radicals",
     summary: "Use exponent rules as structure shortcuts; avoid decimalizing too early.",
+    repairPlaybook: {
+      tests: "Apply exponent and radical rules with strict base tracking.",
+      trap: "Applying a rule meant for same bases to different bases.",
+      decisionRule: "If bases differ, do not combine exponents directly.",
+      fastMove: "Keep expressions symbolic until the final comparison step.",
+      drillNow: "Simplify one multi-rule exponent expression step by step.",
+      retryPayoff: "Cleaner exponent execution and fewer rule-mismatch mistakes.",
+    },
     keyPoints: [
       "Multiplying same bases adds exponents.",
       "Powers of powers multiply exponents.",
@@ -814,6 +958,14 @@ export const LESSONS: Lesson[] = [
     domain: "Problem Solving and Data Analysis",
     title: "Ratios, Rates, and Percent",
     summary: "Translate words into one proportion, rate, or percent-change equation before computing.",
+    repairPlaybook: {
+      tests: "Set up the right base equation for ratio, rate, and percent change.",
+      trap: "Using the wrong denominator, especially for percent change.",
+      decisionRule: "Percent change always divides by the original value.",
+      fastMove: "Write base quantity and units before touching arithmetic.",
+      drillNow: "Compute one percent-change item with explicit original denominator.",
+      retryPayoff: "Cleaner setup and fewer denominator mistakes in data problems.",
+    },
     keyPoints: [
       "Percent means per 100.",
       "Percent change is change divided by original.",
@@ -860,6 +1012,14 @@ export const LESSONS: Lesson[] = [
     domain: "Problem Solving and Data Analysis",
     title: "Data Analysis and Probability",
     summary: "Read the table or graph literally, then compute the requested relationship.",
+    repairPlaybook: {
+      tests: "Extract exact values from data displays and compute the requested statistic.",
+      trap: "Using the wrong denominator or skipping axis/unit checks.",
+      decisionRule: "If the question says among, that group must be the denominator.",
+      fastMove: "Name numerator, denominator, and units before arithmetic.",
+      drillNow: "Solve one probability item and justify denominator choice.",
+      retryPayoff: "More accurate data reads and fewer denominator errors.",
+    },
     keyPoints: [
       "Probability is favorable outcomes divided by total outcomes.",
       "Mean is sensitive to extreme values; median is the middle.",
@@ -906,6 +1066,14 @@ export const LESSONS: Lesson[] = [
     domain: "Geometry and Trigonometry",
     title: "Geometry: Triangles, Circles, and Trig",
     summary: "Draw, label, and choose the geometry fact before doing arithmetic.",
+    repairPlaybook: {
+      tests: "Map diagram structure to the correct geometry rule before calculation.",
+      trap: "Using formulas with wrong target quantity (radius vs diameter, wrong trig side).",
+      decisionRule: "If angle-based side ratio is asked, label opposite/adjacent/hypotenuse first.",
+      fastMove: "Annotate figure and select theorem before substituting numbers.",
+      drillNow: "Solve one right-triangle or circle form item from a labeled sketch.",
+      retryPayoff: "More reliable setup and fewer formula-target mismatches.",
+    },
     keyPoints: [
       "Right triangles invite Pythagorean theorem or trig ratios.",
       "Circle equations reveal center and radius.",

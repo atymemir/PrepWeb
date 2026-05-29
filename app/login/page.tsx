@@ -5,6 +5,7 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { getSupabase } from "@/app/lib/supabase";
+import BrandWordmark from "@/app/components/BrandWordmark";
 
 type AuthMode = "signin" | "signup";
 type OAuthProvider = "google";
@@ -225,44 +226,44 @@ function LoginPageInner() {
   return (
     <main className="min-h-[70vh] grid items-center">
       <div className="mx-auto grid w-full max-w-5xl gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-        <section className="rounded-3xl border border-gray-200 bg-white p-6 sm:p-8">
-          <div className="inline-flex items-center rounded-full border border-gray-200 px-3 py-1 text-xs font-semibold text-gray-600">
-            ALGA Account
+        <section className="premium-hero ink-surface rounded-3xl border border-[#22345e] p-6 sm:p-8">
+          <div className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-semibold text-[#bdd5ff]">
+            <BrandWordmark compact className="display-font font-bold text-[#bdd5ff]" /> account
           </div>
 
-          <h1 className="mt-4 text-3xl font-semibold tracking-tight">
-            Sign in and start your SAT loop.
+          <h1 className="mt-4 text-3xl font-semibold tracking-tight text-white">
+            Sign in and run your next best move.
           </h1>
 
-          <p className="mt-3 max-w-xl text-sm leading-relaxed text-gray-600">
-            Alga turns SAT prep into one system: Practice creates signal, Review clears debt, Skills/Lessons repair weaknesses, and History/Coach keep decisions sharp.
+          <p className="mt-3 max-w-xl text-sm leading-relaxed text-[#d2dbec]">
+            alga prep gives one clear loop: generate signal, recover mistakes, repair weak skill, verify movement.
           </p>
 
-          <div className="mt-6 rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-4">
-            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">First click after auth</div>
-            <div className="mt-2 text-sm font-semibold text-[#0f172a]">Open Today mission or run your first 12-question block.</div>
-            <div className="mt-1 text-xs text-gray-600">
-              One completed block unlocks real review debt routing and weakest-skill targeting.
+          <div className="mt-6 rounded-2xl border border-white/20 bg-white/6 p-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">After login</div>
+            <div className="mt-2 text-sm font-semibold text-white">Open Today mission or run a 12-question block.</div>
+            <div className="mt-1 text-xs text-[#c8d5ea]">
+              One completed block unlocks a reliable weak-skill priority.
             </div>
           </div>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-3">
-            <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">1. Practice</div>
-              <div className="mt-1 text-sm text-gray-700">Generate signal</div>
+            <div className="rounded-xl border border-white/15 bg-white/6 px-3 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#9ebcf3]">1. Practice</div>
+              <div className="mt-1 text-sm text-[#d6e0f1]">Create evidence</div>
             </div>
-            <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">2. Review</div>
-              <div className="mt-1 text-sm text-gray-700">Clear debt</div>
+            <div className="rounded-xl border border-white/15 bg-white/6 px-3 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#9ebcf3]">2. Review</div>
+              <div className="mt-1 text-sm text-[#d6e0f1]">Recover mistakes</div>
             </div>
-            <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">3. Repair</div>
-              <div className="mt-1 text-sm text-gray-700">Skills + Lessons</div>
+            <div className="rounded-xl border border-white/15 bg-white/6 px-3 py-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#9ebcf3]">3. Repair</div>
+              <div className="mt-1 text-sm text-[#d6e0f1]">Skills + Lessons</div>
             </div>
           </div>
 
-          <div className="mt-6 text-xs text-gray-500">
-            New here? Sign up, then complete a 60-second onboarding to set target and launch first session.
+          <div className="mt-6 text-xs text-[#bfcee7]">
+            New here: sign up, finish onboarding, launch first block.
           </div>
         </section>
 
@@ -349,7 +350,7 @@ function LoginPageInner() {
               <button
                 onClick={() => void signIn()}
                 disabled={busy || !email || !password}
-                className="inline-flex items-center justify-center rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-60"
+                className="inline-flex items-center justify-center rounded-xl border border-[#0e1b34] bg-[linear-gradient(135deg,#0f1b34,#182d52)] px-4 py-3 text-sm font-semibold text-white transition hover:brightness-105 disabled:opacity-60"
               >
                 {busy ? "Signing in…" : "Sign in"}
               </button>
@@ -357,7 +358,7 @@ function LoginPageInner() {
               <button
                 onClick={() => void signUp()}
                 disabled={busy || !email || !password}
-                className="inline-flex items-center justify-center rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-60"
+                className="inline-flex items-center justify-center rounded-xl border border-[#0e1b34] bg-[linear-gradient(135deg,#0f1b34,#182d52)] px-4 py-3 text-sm font-semibold text-white transition hover:brightness-105 disabled:opacity-60"
               >
                 {busy ? "Creating account…" : "Create account"}
               </button>
@@ -367,12 +368,12 @@ function LoginPageInner() {
               href="/"
               className="inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm font-semibold text-black transition hover:bg-gray-50"
             >
-              Back to home
+              Back to product
             </Link>
           </div>
 
           <div className="mt-4 text-xs text-gray-500">
-            By continuing, you’re using ALGA as a training system, not a score-promise machine.
+            No score promises. Only execution quality and measurable movement.
           </div>
         </section>
       </div>

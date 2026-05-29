@@ -9,6 +9,46 @@ export type SessionTopicSnapshot = {
   totalCount: number;
 };
 
+export type SessionQuestionSnapshot = {
+  questionId: string;
+  position: number;
+  subject: string | null;
+  topic: string | null;
+  questionText: string;
+  optionA: string;
+  optionB: string;
+  optionC: string;
+  optionD: string;
+  correctOption: string;
+  selectedOption: string;
+  isCorrect: boolean;
+  isReview: boolean;
+  timeTakenSeconds: number;
+  explanation: string | null;
+};
+
+export type StudySessionQuestionRecord = {
+  id: string;
+  sessionId: string;
+  userId: string;
+  questionId: string;
+  position: number;
+  subject: string | null;
+  topic: string | null;
+  questionText: string;
+  optionA: string;
+  optionB: string;
+  optionC: string;
+  optionD: string;
+  correctOption: string;
+  selectedOption: string;
+  isCorrect: boolean;
+  isReview: boolean;
+  timeTakenSeconds: number;
+  explanation: string | null;
+  createdAt: string;
+};
+
 export type StudySessionRecord = {
   id: string;
   userId: string;
@@ -45,6 +85,11 @@ function pct(correct: number, total: number): number {
   return Math.max(0, Math.min(100, Math.round((correct / total) * 100)));
 }
 
+function isMissingQuestionHistoryTable(error: { code?: string; message?: string } | null | undefined): boolean {
+  const message = String(error?.message || "").toLowerCase();
+  return error?.code === "42P01" || message.includes("study_session_questions");
+}
+
 async function requireUser() {
   const supabase = getSupabase();
   const { data, error } = await supabase.auth.getSession();
@@ -68,6 +113,7 @@ export async function recordStudySession(input: {
   scoreBandLow?: number | null;
   scoreBandHigh?: number | null;
   topics?: SessionTopicSnapshot[];
+  questions?: SessionQuestionSnapshot[];
 }): Promise<{ sessionId: string }> {
   const { supabase, userId } = await requireUser();
 
@@ -138,6 +184,42 @@ export async function recordStudySession(input: {
     }
   }
 
+  if (input.questions && input.questions.length > 0) {
+    const normalizedQuestions = input.questions
+      .map((question) => ({
+        session_id: sessionId,
+        user_id: userId,
+        question_id: question.questionId,
+        position: Math.max(1, safeRound(question.position)),
+        subject: question.subject ?? null,
+        topic: (question.topic ?? "").trim() || null,
+        question_text: String(question.questionText ?? "").trim(),
+        option_a: String(question.optionA ?? "").trim(),
+        option_b: String(question.optionB ?? "").trim(),
+        option_c: String(question.optionC ?? "").trim(),
+        option_d: String(question.optionD ?? "").trim(),
+        correct_option: String(question.correctOption ?? "").toUpperCase(),
+        selected_option: String(question.selectedOption ?? "").toUpperCase(),
+        is_correct: !!question.isCorrect,
+        is_review: !!question.isReview,
+        time_taken_seconds: Math.max(0, safeRound(question.timeTakenSeconds)),
+        explanation: question.explanation ?? null,
+      }))
+      .filter((question) => question.question_text.length > 0);
+
+    const delQuestions = await supabase.from("study_session_questions").delete().eq("session_id", sessionId);
+    if (delQuestions.error && !isMissingQuestionHistoryTable(delQuestions.error)) {
+      throw new Error(delQuestions.error.message);
+    }
+
+    if (!delQuestions.error && normalizedQuestions.length > 0) {
+      const insQuestions = await supabase.from("study_session_questions").insert(normalizedQuestions);
+      if (insQuestions.error && !isMissingQuestionHistoryTable(insQuestions.error)) {
+        throw new Error(insQuestions.error.message);
+      }
+    }
+  }
+
   return { sessionId };
 }
 
@@ -200,6 +282,47 @@ export async function getStudySessions(limit = 80): Promise<StudySessionRecord[]
   return sessions.map((session) => ({
     ...session,
     topics: topicsBySession.get(session.id) ?? [],
+  }));
+}
+
+export async function getStudySessionQuestions(sessionId: string): Promise<StudySessionQuestionRecord[]> {
+  const { supabase, userId } = await requireUser();
+
+  const res = await supabase
+    .from("study_session_questions")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("session_id", sessionId)
+    .order("position", { ascending: true })
+    .order("created_at", { ascending: true });
+
+  if (res.error) {
+    if (isMissingQuestionHistoryTable(res.error)) {
+      return [];
+    }
+    throw new Error(res.error.message);
+  }
+
+  return ((res.data ?? []) as any[]).map((row) => ({
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    userId: String(row.user_id),
+    questionId: String(row.question_id),
+    position: Math.max(1, safeRound(row.position)),
+    subject: row.subject ?? null,
+    topic: row.topic ?? null,
+    questionText: String(row.question_text ?? ""),
+    optionA: String(row.option_a ?? ""),
+    optionB: String(row.option_b ?? ""),
+    optionC: String(row.option_c ?? ""),
+    optionD: String(row.option_d ?? ""),
+    correctOption: String(row.correct_option ?? "").toUpperCase(),
+    selectedOption: String(row.selected_option ?? "").toUpperCase(),
+    isCorrect: !!row.is_correct,
+    isReview: !!row.is_review,
+    timeTakenSeconds: Math.max(0, safeRound(row.time_taken_seconds)),
+    explanation: row.explanation ?? null,
+    createdAt: String(row.created_at),
   }));
 }
 

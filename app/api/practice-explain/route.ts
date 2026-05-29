@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
     };
 
     const systemPrompt = `
-You are an SAT explanation assistant inside a product called alga.
+You are an SAT explanation assistant inside ALGA Prep.
 
 Your job:
 - explain why the correct answer is right

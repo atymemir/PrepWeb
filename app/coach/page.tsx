@@ -5,35 +5,12 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
-import { normalizePlanTier, tierDefinition, tierTone, type PlanTier } from "../lib/productTiers";
-import {
-  confidenceLabel,
-  pct,
-  sortWeakest,
-  pickWeakestAcrossSubjects,
-  stableRows,
-  lowSignalRows,
-  type SkillRow as SharedSkillRow,
-} from "../lib/learningSignals";
+import { focusedLessonHref, focusedPracticeHref } from "../lib/mastery";
+import { tierDefinition, tierTone, type PlanTier } from "../lib/productTiers";
+import type { WeakSkillSignal } from "../lib/studentState";
 import { useStudentState } from "../lib/useStudentState";
+import { CoachStrategistCompanion } from "../components/PageVisualCompanions";
 import { ActionDock, Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
-
-type Profile = {
-  id: string;
-  nickname: string | null;
-  target_score: number | null;
-  daily_study_hours: number | null;
-  exam_date: string | null;
-  weakest_area: string | null;
-  current_level: string | null;
-  plan_tier: string | null;
-};
-
-type SkillRow = SharedSkillRow;
-
-type Question = {
-  id: string;
-};
 
 type LeaderEntry = {
   user_id: string;
@@ -58,7 +35,7 @@ function daysUntil(iso: string | null): number | null {
 
 function coachHeadline(args: {
   dueReviewCount: number;
-  weakestOverall: { subject: "Reading" | "Math"; row: SkillRow } | null;
+  weakestOverall: WeakSkillSignal | null;
   dleft: number | null;
 }) {
   const { dueReviewCount, weakestOverall, dleft } = args;
@@ -74,9 +51,9 @@ function coachHeadline(args: {
     };
   }
 
-  if (weakestOverall?.row) {
+  if (weakestOverall) {
     return {
-      title: `Your best opportunity is ${weakestOverall.row.subskill}.`,
+      title: `Your best opportunity is ${weakestOverall.subskill}.`,
       body: `This is the weakest current signal in ${weakestOverall.subject}. Fixing it now should improve your next practice loop more than broad unfocused work.`,
       tone: "accent" as const,
     };
@@ -105,11 +82,7 @@ export default function CoachPage() {
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [skillsReading, setSkillsReading] = useState<SkillRow[]>([]);
-  const [skillsMath, setSkillsMath] = useState<SkillRow[]>([]);
-  const [dueReviewCount, setDueReviewCount] = useState(0);
+  const [viewerUserId, setViewerUserId] = useState<string | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderEntry[]>([]);
 
   const [aiLoading, setAiLoading] = useState(false);
@@ -122,34 +95,32 @@ export default function CoachPage() {
     tone_label: "Focused" | "Urgent" | "Rebuild" | "Advance";
   }>(null);
 
-  const nickname = profile?.nickname?.trim() || "Student";
-  const planTier = useMemo<PlanTier>(() => normalizePlanTier(profile?.plan_tier ?? "free"), [profile?.plan_tier]);
+  const nickname = studentState?.profile.nickname || "Student";
+  const planTier = useMemo<PlanTier>(() => studentState?.profile.planTier ?? "free", [studentState?.profile.planTier]);
   const tier = useMemo(() => tierDefinition(planTier), [planTier]);
-  const dleft = useMemo(() => daysUntil(profile?.exam_date ?? null), [profile]);
+  const dleft = useMemo(() => daysUntil(studentState?.profile.examDate ?? null), [studentState?.profile.examDate]);
 
-  const weakestOverall = useMemo(() => {
-    return pickWeakestAcrossSubjects(skillsReading, skillsMath);
-  }, [skillsReading, skillsMath]);
+  const weakestOverall = studentState?.weakestSkill ?? null;
 
   const stableWeakAreas = useMemo(() => {
-    return sortWeakest(stableRows([...skillsReading, ...skillsMath])).slice(0, 3);
-  }, [skillsReading, skillsMath]);
+    return (studentState?.weakSkillTargets ?? [])
+      .filter((row) => row.attempts >= 6)
+      .slice(0, 3);
+  }, [studentState?.weakSkillTargets]);
 
-  const lowSignalCount = useMemo(() => {
-    return lowSignalRows([...skillsReading, ...skillsMath]).length;
-  }, [skillsReading, skillsMath]);
+  const lowSignalCount = studentState?.lowSignalCount ?? 0;
 
   const myLeague = useMemo(() => {
-    if (!profile) return null;
-    const idx = leaderboard.findIndex((x) => x.user_id === profile.id);
+    if (!viewerUserId) return null;
+    const idx = leaderboard.findIndex((x) => x.user_id === viewerUserId);
     if (idx === -1) return null;
     return {
       rank: idx + 1,
       points: Math.round(leaderboard[idx].points),
     };
-  }, [leaderboard, profile]);
+  }, [leaderboard, viewerUserId]);
 
-  const activeDueReviewCount = studentState?.reviewDebt.dueCount ?? dueReviewCount;
+  const activeDueReviewCount = studentState?.reviewDebt.dueCount ?? 0;
 
   const strategistNote = useMemo(() => {
     return coachHeadline({
@@ -159,31 +130,27 @@ export default function CoachPage() {
     });
   }, [activeDueReviewCount, weakestOverall, dleft]);
 
-  const nextAction = useMemo(() => {
+  const fallbackNextAction = useMemo(() => {
     if (activeDueReviewCount > 0) {
       return {
         title: "Clear the recovery queue",
         description: "Review is due. Do not stack new questions on top of unresolved mistakes.",
         primaryHref: "/review",
         primaryLabel: "Start review",
-        secondaryHref: weakestOverall?.row
-          ? `/practice?subject=${weakestOverall.subject}&subskill=${encodeURIComponent(weakestOverall.row.subskill)}`
+        secondaryHref: weakestOverall
+          ? focusedPracticeHref(weakestOverall.subject, weakestOverall.subskill)
           : "/today",
-        secondaryLabel: weakestOverall?.row ? "Skip to weakest practice" : "Back to Today",
+        secondaryLabel: weakestOverall ? "Skip to weakest practice" : "Back to Today",
       };
     }
 
-    if (weakestOverall?.row) {
+    if (weakestOverall) {
       return {
-        title: `Repair ${weakestOverall.row.subskill}`,
-        description: `Current weakest zone in ${weakestOverall.subject}: ${pct(
-          weakestOverall.row.accuracy
-        )}% over ${weakestOverall.row.attempts} attempts.`,
-        primaryHref: `/practice?subject=${weakestOverall.subject}&subskill=${encodeURIComponent(
-          weakestOverall.row.subskill
-        )}`,
+        title: `Repair ${weakestOverall.subskill}`,
+        description: `Current weakest zone in ${weakestOverall.subject}: ${weakestOverall.accuracyPct}% over ${weakestOverall.attempts} attempts.`,
+        primaryHref: focusedPracticeHref(weakestOverall.subject, weakestOverall.subskill),
         primaryLabel: "Practice weakest",
-        secondaryHref: `/lesson/${encodeURIComponent(weakestOverall.row.subskill)}`,
+        secondaryHref: focusedLessonHref(weakestOverall.subskill),
         secondaryLabel: "Open lesson",
       };
     }
@@ -200,7 +167,7 @@ export default function CoachPage() {
   }, [activeDueReviewCount, weakestOverall]);
 
   const effectiveNextAction = useMemo(() => {
-    if (!studentState) return nextAction;
+    if (!studentState) return fallbackNextAction;
     return {
       title: studentState.recommendedAction.title,
       description: `${studentState.recommendedAction.reason} ${studentState.recommendedAction.payoff}`,
@@ -209,7 +176,7 @@ export default function CoachPage() {
       secondaryHref: studentState.recommendedAction.secondaryHref,
       secondaryLabel: studentState.recommendedAction.secondaryLabel,
     };
-  }, [studentState, nextAction]);
+  }, [studentState, fallbackNextAction]);
 
   const coachSnapshot = useMemo(() => {
     return {
@@ -219,7 +186,7 @@ export default function CoachPage() {
       weeklyRank: myLeague?.rank ?? null,
       weeklyPoints: myLeague?.points ?? null,
       stableWeakAreas: stableWeakAreas.map((row) => ({
-        subject: skillsReading.includes(row) ? "Reading" as const : "Math" as const,
+        subject: row.subject,
         subskill: row.subskill,
         domain: row.domain,
         skill: row.skill,
@@ -229,10 +196,10 @@ export default function CoachPage() {
       lowSignalCount,
       nextAction: effectiveNextAction,
     };
-  }, [nickname, dleft, activeDueReviewCount, myLeague, stableWeakAreas, lowSignalCount, effectiveNextAction, skillsReading]);
+  }, [nickname, dleft, activeDueReviewCount, myLeague, stableWeakAreas, lowSignalCount, effectiveNextAction]);
 
   const threeStepPlan = useMemo(() => {
-    if (activeDueReviewCount > 0 && weakestOverall?.row) {
+    if (activeDueReviewCount > 0 && weakestOverall) {
       return [
         {
           step: "1",
@@ -243,39 +210,35 @@ export default function CoachPage() {
         },
         {
           step: "2",
-          title: `Target ${weakestOverall.row.subskill}`,
+          title: `Target ${weakestOverall.subskill}`,
           text: "Immediately follow recovery with narrow repair on the weakest live signal.",
-          href: `/practice?subject=${weakestOverall.subject}&subskill=${encodeURIComponent(
-            weakestOverall.row.subskill
-          )}`,
+          href: focusedPracticeHref(weakestOverall.subject, weakestOverall.subskill),
           label: "Practice weakest",
         },
         {
           step: "3",
           title: "Lock the concept",
           text: "Use the lesson if the weakness is conceptual, not just execution-based.",
-          href: `/lesson/${encodeURIComponent(weakestOverall.row.subskill)}`,
+          href: focusedLessonHref(weakestOverall.subskill),
           label: "Open lesson",
         },
       ];
     }
 
-    if (weakestOverall?.row) {
+    if (weakestOverall) {
       return [
         {
           step: "1",
-          title: `Repair ${weakestOverall.row.subskill}`,
+          title: `Repair ${weakestOverall.subskill}`,
           text: "Your weakest live signal deserves first attention.",
-          href: `/practice?subject=${weakestOverall.subject}&subskill=${encodeURIComponent(
-            weakestOverall.row.subskill
-          )}`,
+          href: focusedPracticeHref(weakestOverall.subject, weakestOverall.subskill),
           label: "Practice weakest",
         },
         {
           step: "2",
           title: "Read the repair note",
           text: "If the problem is conceptual, use the lesson before repeating more questions.",
-          href: `/lesson/${encodeURIComponent(weakestOverall.row.subskill)}`,
+          href: focusedLessonHref(weakestOverall.subskill),
           label: "Open lesson",
         },
         {
@@ -331,45 +294,11 @@ export default function CoachPage() {
 
       const userId = session.user.id;
 
-      let profileRes = await supabase
-        .from("profiles")
-        .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level,plan_tier")
-        .eq("id", userId)
-        .single();
+      setViewerUserId(userId);
 
-      if (
-        profileRes.error &&
-        String(profileRes.error.message || "").toLowerCase().includes("plan_tier")
-      ) {
-        profileRes = await supabase
-          .from("profiles")
-          .select("id,nickname,target_score,daily_study_hours,exam_date,weakest_area,current_level")
-          .eq("id", userId)
-          .single();
-      }
-
-      if (profileRes.error) throw new Error(profileRes.error.message);
-      const base = profileRes.data as Omit<Profile, "plan_tier"> & { plan_tier?: string | null };
-      setProfile({
-        ...base,
-        plan_tier: base.plan_tier ?? "free",
-      });
-
-      const [readingRes, mathRes, dueRes, lbRes] = await Promise.all([
-        supabase.rpc("get_skill_mastery", { p_subject: "Reading" }),
-        supabase.rpc("get_skill_mastery", { p_subject: "Math" }),
-        supabase.rpc("get_due_review_questions", { p_limit: 50 }),
-        supabase.rpc("get_weekly_leaderboard"),
-      ]);
-
-      if (readingRes.error) throw new Error(readingRes.error.message);
-      if (mathRes.error) throw new Error(mathRes.error.message);
-      if (dueRes.error) throw new Error(dueRes.error.message);
+      const lbRes = await supabase.rpc("get_weekly_leaderboard");
       if (lbRes.error) throw new Error(lbRes.error.message);
 
-      setSkillsReading((readingRes.data ?? []) as SkillRow[]);
-      setSkillsMath((mathRes.data ?? []) as SkillRow[]);
-      setDueReviewCount(((dueRes.data ?? []) as Question[]).length);
       setLeaderboard((lbRes.data ?? []) as LeaderEntry[]);
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "Failed to load coach.");
@@ -435,20 +364,24 @@ export default function CoachPage() {
   return (
     <main className="min-h-screen">
       <PageHeader
-        label="Strategist layer"
+        label="Coach"
         title="Coach"
-        subtitle={`Personal analysis for ${nickname}. Understand what matters now.`}
+        subtitle={`Action guidance for ${nickname}. Start with one clear step.`}
         right={
           <div className="flex items-center gap-2">
             <Pill text={`${tier.label} plan`} tone={tierTone(planTier)} />
-            <Pill text="Strategist" tone="accent" />
+            <Pill text="Action mode" tone="accent" />
           </div>
         }
       />
 
       {loading && (
-        <Card title="Loading…" subtitle="Building your strategist view">
-          <div className="text-sm text-gray-600">Please wait.</div>
+        <Card title="Loading coach" subtitle="Building your action view">
+          <div className="space-y-2">
+            <div className="state-skeleton h-3 w-2/3" />
+            <div className="state-skeleton h-3 w-1/2" />
+            <div className="state-skeleton h-24 w-full" />
+          </div>
         </Card>
       )}
 
@@ -466,15 +399,15 @@ export default function CoachPage() {
         <div className="grid gap-5">
           <LoopRail
             active="Coach"
-            next={activeDueReviewCount > 0 ? "Review" : weakestOverall?.row ? "Practice" : "Practice"}
-            note="Coach should interpret the loop, not replace it."
+            next={activeDueReviewCount > 0 ? "Review" : "Practice"}
+            note="Coach should point to action, not replace practice."
           />
 
           <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
-            <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.2fr_0.8fr]">
+            <div className="p-5 sm:p-6">
               <div>
                 <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
-                  Strategist command
+                  Do this now
                 </div>
                 <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">{effectiveNextAction.title}</h2>
                 <p className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
@@ -496,30 +429,19 @@ export default function CoachPage() {
                 </div>
               </div>
 
-              <div className="grid gap-3">
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Due review</div>
-                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{activeDueReviewCount}</div>
-                  <div className="mt-1 text-xs text-[#c5d1e8]">Immediate recovery load</div>
-                </div>
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Stable weak areas</div>
-                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{stableWeakAreas.length}</div>
-                  <div className="mt-1 text-xs text-[#c5d1e8]">High-confidence weak signals</div>
-                </div>
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">AI window</div>
-                  <div className="mt-1 text-2xl font-semibold tracking-tight text-white">
-                    {tier.limits.coachAi ? `${tier.limits.coachRateLimitPer10Min}/10m` : "Locked"}
-                  </div>
-                  <div className="mt-1 text-xs text-[#c5d1e8]">{tier.label} plan</div>
-                </div>
+              <div className="mt-5">
+                <CoachStrategistCompanion
+                  due={activeDueReviewCount}
+                  weakCount={stableWeakAreas.length}
+                  aiWindow={tier.limits.coachAi ? `${tier.limits.coachRateLimitPer10Min}/10m` : "Locked"}
+                  division={tier.label}
+                />
               </div>
             </div>
           </section>
 
           {studentState && (
-            <Card title="Live guide layer" subtitle="Contextual nudges pulled from the same student state used across the app." right={<Pill text="Deterministic" tone="accent" />}>
+            <Card title="Why this matters" subtitle="Context from the same student state used across Today, Practice, and Review." right={<Pill text="State-based" tone="accent" />}>
               <div className="grid gap-2 sm:grid-cols-2">
                 {studentState.contextualMessages.coach.slice(0, 4).map((message) => (
                   <div key={message.id} className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-700">
@@ -538,8 +460,8 @@ export default function CoachPage() {
           )}
 
           <Card
-            title="Strategist note"
-            subtitle="Personalized interpretation of your current training state."
+            title="Ask Coach"
+            subtitle="Get a short answer with a clear next step."
             right={
               <Pill
                 text={
@@ -557,10 +479,10 @@ export default function CoachPage() {
             }
             accent
           >
-            <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
-              <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
-                Personal strategist
-              </div>
+              <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
+                  Coach response
+                </div>
               {aiLoading ? (
                 <div className="mt-3 text-sm text-gray-600">Generating strategist note…</div>
               ) : aiError ? (
@@ -585,7 +507,7 @@ export default function CoachPage() {
                 </>
               )}
 
-              <div className="mt-5 flex flex-wrap gap-3">
+                <div className="mt-5 flex flex-wrap gap-3">
                 {tier.limits.coachAi ? (
                   <>
                     <button
@@ -600,7 +522,7 @@ export default function CoachPage() {
                         : "Generate strategist note"}
                     </button>
                     <div className="flex items-center text-xs text-gray-500">
-                      AI analysis is optional and may take 5-15 seconds.
+                      Ask specific prompts, for example: What should I do in the next 25 minutes?
                     </div>
                   </>
                 ) : (
@@ -612,7 +534,7 @@ export default function CoachPage() {
                       Unlock AI strategist
                     </Link>
                     <div className="flex items-center text-xs text-gray-500">
-                      Pro and Ultimate unlock strategist generation.
+                      Pro and Ultimate unlock coach generation.
                     </div>
                   </>
                 )}
@@ -641,8 +563,8 @@ export default function CoachPage() {
 
           <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
             <Card
-              title="Best next action"
-              subtitle="Do this before you start improvising."
+              title="Do this now"
+              subtitle="Start here before anything else."
               right={<Pill text="Now" tone="accent" />}
               accent
             >
@@ -657,10 +579,10 @@ export default function CoachPage() {
               </div>
             </Card>
 
-            <Card title="Context snapshot" subtitle="Supporting facts behind the recommendation." accent>
+            <Card title="Why this recommendation" subtitle="The data behind this next step." accent>
               <div className="grid gap-4 sm:grid-cols-2">
                 <StatBox
-                  label="Review due"
+                  label="Mistakes waiting"
                   value={String(activeDueReviewCount)}
                   hint="Recovery pressure"
                   accent={activeDueReviewCount > 0}
@@ -685,23 +607,18 @@ export default function CoachPage() {
                   accent={stableWeakAreas.length > 0}
                 />
                 <StatBox
-                  label="Low-signal rows"
+                  label="Low-data skills"
                   value={String(lowSignalCount)}
                   hint="Needs more evidence"
                 />
               </div>
 
-              {myLeague && (
-                <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
-                  League snapshot: rank #{myLeague.rank} with {myLeague.points} weekly points.
-                </div>
-              )}
             </Card>
           </div>
 
           <Card
-            title="Your 3-step route"
-            subtitle="Do not try to fix everything at once. Follow a sequence."
+            title="What to do after"
+            subtitle="Follow this sequence so your next session stays focused."
             right={<Pill text="Action plan" tone="accent" />}
           >
             <div className="grid gap-3">
@@ -727,7 +644,7 @@ export default function CoachPage() {
           </Card>
 
           <div className="grid gap-4 lg:grid-cols-2">
-            <Card title="Strongest current concerns" subtitle="These are the weakest stable signals, not random low-sample noise.">
+            <Card title="Skills that need attention" subtitle="These are stable weak areas, not random low-sample noise.">
               {stableWeakAreas.length > 0 ? (
                 <div className="grid gap-3">
                   {stableWeakAreas.map((row, i) => (
@@ -739,12 +656,12 @@ export default function CoachPage() {
                             {row.domain} • {row.skill}
                           </div>
                           <div className="mt-2 text-sm text-gray-700">
-                            {pct(row.accuracy)}% over {row.attempts} attempts • {confidenceLabel(row.attempts)} confidence
+                            {row.accuracyPct}% over {row.attempts} attempts • {row.confidence} confidence
                           </div>
                         </div>
 
                         <Link
-                          href={`/practice?subject=${skillsReading.includes(row) ? "Reading" : "Math"}&subskill=${encodeURIComponent(row.subskill)}`}
+                          href={focusedPracticeHref(row.subject, row.subskill)}
                           className="text-sm font-semibold text-[#004aad] underline hover:text-[#003b88]"
                         >
                           Repair
@@ -760,14 +677,16 @@ export default function CoachPage() {
               )}
             </Card>
 
-            <Card title="AI guardrails" subtitle="Keep the coach useful, grounded, and cheap.">
-              <div className="text-sm leading-relaxed text-gray-700">
-                This page is driven by deterministic performance logic first. AI should only explain the signals already present:
-                due review, weak zones, sample size, and the next action.
+            <Card title="Ask Coach a specific question" subtitle="Short, specific prompts produce better action plans.">
+              <div className="grid gap-2 text-sm leading-relaxed text-gray-700">
+                <div>Use prompts tied to immediate execution, for example:</div>
+                <div>- What should I do in the next 30 minutes?</div>
+                <div>- Should I review first or run a timed set?</div>
+                <div>- What should I do after this review block?</div>
               </div>
 
               <div className="mt-4 rounded-xl border border-[#d9e7ff] bg-[#f8fbff] p-4 text-sm text-gray-700">
-                Guardrail: no score promises, no generic motivation, no broad chat. The output should make the next session clearer.
+                Guardrail: no score promises and no generic motivation. The answer should make the next action clearer.
               </div>
               <div className="mt-4 rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
                 Current plan: <span className="font-semibold text-black">{tier.label}</span>
@@ -788,7 +707,7 @@ export default function CoachPage() {
       )}
       {!loading && !err && (
         <ActionDock
-          title="Strategist command"
+          title="Coach action"
           note={effectiveNextAction.description}
           primary={{ label: effectiveNextAction.primaryLabel, href: effectiveNextAction.primaryHref }}
           secondary={{ label: effectiveNextAction.secondaryLabel, href: effectiveNextAction.secondaryHref }}

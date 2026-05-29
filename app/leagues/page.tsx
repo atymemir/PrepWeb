@@ -13,6 +13,7 @@ import {
 } from "../lib/engagement";
 import { getDurableEngagementSnapshot } from "../lib/engagementDurable";
 import { useStudentState } from "../lib/useStudentState";
+import { CommunityProofCompanion } from "../components/PageVisualCompanions";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 import { IdentityStatusCard } from "../components/EngagementSystem";
 
@@ -150,7 +151,7 @@ export default function LeaguesPage() {
     () => rows.reduce((sum, row) => sum + row.review_answered, 0),
     [rows]
   );
-  const inviteCode = useMemo(() => (userId ? `ALGA-${userId.slice(0, 8).toUpperCase()}` : "ALGA"), [userId]);
+  const inviteCode = useMemo(() => (userId ? `ALGAPREP-${userId.slice(0, 8).toUpperCase()}` : "ALGAPREP"), [userId]);
 
   const pointsToClimb = useMemo(() => {
     if (!myRow || !myRank || myRank <= 1) return 0;
@@ -193,30 +194,30 @@ export default function LeaguesPage() {
   }, [identity, identityStatus, myRow]);
 
   const debtProofText = useMemo(() => {
-    if (!studentState) return "Student state syncing. Finish one block to publish real debt-recovery proof.";
+    if (!studentState) return "Student state syncing. Finish one block to publish real review-progress proof.";
     if (studentState.reviewDebt.dueCount === 0) {
-      return "I cleared my ALGA review debt to 0 today and moved back to focused SAT practice.";
+      return "I cleared my algₐ prep review queue today and moved back to focused SAT practice.";
     }
-    return `I worked my recovery queue on ALGA and currently have ${studentState.reviewDebt.dueCount} due left. Keeping debt honest before new volume.`;
+    return `I worked my review queue on algₐ prep and currently have ${studentState.reviewDebt.dueCount} left. Clearing mistakes before new volume.`;
   }, [studentState]);
 
   const improvementProofText = useMemo(() => {
     if (!studentState) return "Student state syncing. Run one comparable block to unlock topic-improvement proof text.";
     const gain = studentState.recentMovement.biggestGain;
     if (gain) {
-      return `I improved ${gain.topic} by +${gain.delta}% in my latest comparable SAT block on ALGA.`;
+      return `I improved ${gain.topic} by +${gain.delta}% in my latest comparable SAT block on algₐ prep.`;
     }
     if (studentState.weakestSkill) {
       return `Working on ${studentState.weakestSkill.subskill} (${studentState.weakestSkill.accuracyPct}% right now) and pushing a focused retry next.`;
     }
-    return "I finished a focused ALGA SAT block and I am replaying the same shape to produce clean movement proof.";
+    return "I finished a focused algₐ prep SAT block and I am replaying the same shape to produce clean movement proof.";
   }, [studentState]);
 
   const telegramBridgeText = useMemo(() => {
     return [
-      "ALGA Telegram weekly challenge:",
+      "algₐ prep Telegram weekly challenge:",
       "1) Run one 12Q block",
-      "2) Clear review debt",
+      "2) Clear mistakes waiting for review",
       "3) Post your result screenshot and weakest-topic retry plan",
     ].join(" ");
   }, []);
@@ -363,12 +364,11 @@ export default function LeaguesPage() {
                     </SecondaryButton>
                   </div>
                 </div>
-                <div className="rounded-xl border border-gray-200 bg-white p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">What moves rank</div>
-                  <div className="mt-2 text-sm text-gray-700">
-                    Clear debt, then execute weakest-topic retry. Weekly rank follows real output, not passive leaderboard viewing.
-                  </div>
-                </div>
+                <CommunityProofCompanion
+                  due={studentState.reviewDebt.dueCount}
+                  weakLabel={studentState.weakestSkill ? studentState.weakestSkill.subskill : "Generate weak target"}
+                  cadence={`${studentState.reviewDebt.blockSize}Q debt blocks`}
+                />
               </div>
             </Card>
           )}

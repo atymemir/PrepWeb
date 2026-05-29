@@ -35,6 +35,16 @@
   --label-size: 0.68rem;
   --label-weight: 600;
   --label-spacing: 0.14em;
+
+  --radius-card: 18px;
+  --radius-panel: 24px;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-7: 2rem;
 }
 
 html,
@@ -45,15 +55,16 @@ body {
 
 body {
   font-family:
-    "Manrope",
+    "Montserrat",
     "Avenir Next",
     "Segoe UI",
     "Helvetica Neue",
     sans-serif;
   text-rendering: optimizeLegibility;
   background:
-    radial-gradient(1200px 680px at -8% -14%, rgba(var(--accent), 0.13), transparent 62%),
-    radial-gradient(1080px 720px at 108% 4%, rgba(var(--accent-deep), 0.11), transparent 62%),
+    radial-gradient(1220px 700px at -8% -14%, rgba(var(--accent), 0.13), transparent 62%),
+    radial-gradient(1100px 740px at 108% 4%, rgba(var(--accent-deep), 0.12), transparent 62%),
+    radial-gradient(980px 620px at 50% 130%, rgba(255, 255, 255, 0.82), transparent 70%),
     linear-gradient(180deg, #f7f9fc 0%, #f1f4f9 42%, #f7f9fc 100%);
 }
 
@@ -66,8 +77,7 @@ h2,
 h3,
 .display-font {
   font-family:
-    "Sora",
-    "Manrope",
+    "Montserrat",
     "Avenir Next",
     sans-serif;
   letter-spacing: -0.03em;
@@ -122,6 +132,67 @@ h3,
 
 .ink-surface {
   background: linear-gradient(145deg, #0f172a 0%, #111827 46%, #0b1222 100%);
+}
+
+.premium-hero {
+  position: relative;
+  isolation: isolate;
+}
+
+.premium-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(520px 220px at 18% -10%, rgba(170, 202, 255, 0.24), transparent 66%),
+    radial-gradient(460px 220px at 82% 110%, rgba(120, 161, 228, 0.2), transparent 68%);
+}
+
+.premium-hero > * {
+  position: relative;
+  z-index: 1;
+}
+
+.accent-sheen {
+  background: linear-gradient(120deg, rgba(255, 255, 255, 0.82), rgba(237, 245, 255, 0.68));
+  border: 1px solid rgba(199, 219, 255, 0.9);
+}
+
+.surface-card {
+  border-radius: var(--radius-card);
+  border: 1px solid rgb(var(--border));
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow-sm);
+}
+
+.surface-card-strong {
+  border-radius: var(--radius-panel);
+  border: 1px solid rgb(var(--border));
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.94));
+  box-shadow: var(--shadow-md);
+}
+
+.state-skeleton {
+  border-radius: 10px;
+  background: linear-gradient(
+    90deg,
+    rgba(var(--surface-strong), 0.9) 25%,
+    rgba(var(--surface), 1) 37%,
+    rgba(var(--surface-strong), 0.9) 63%
+  );
+  background-size: 400% 100%;
+  animation: pulse-skeleton 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-skeleton {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
 }
 
 ::selection {
@@ -185,6 +256,73 @@ a:focus-visible {
     translate: var(--study-fx-drift, 0) 62vh;
     rotate: 120deg;
   }
+}
+
+.visual-anchor-panel {
+  position: relative;
+  overflow: hidden;
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: linear-gradient(145deg, rgba(20, 33, 58, 0.9), rgba(15, 26, 45, 0.94));
+  padding: 1rem;
+  isolation: isolate;
+}
+
+.visual-anchor-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(240px 140px at 86% -10%, rgba(165, 198, 255, 0.35), transparent 70%);
+}
+
+.visual-anchor-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(188, 212, 255, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(188, 212, 255, 0.1) 1px, transparent 1px);
+  background-size: 24px 24px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.66), transparent 82%);
+}
+
+.visual-anchor-orb {
+  position: absolute;
+  right: -40px;
+  top: -30px;
+  height: 136px;
+  width: 136px;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(167, 206, 255, 0.4), rgba(90, 127, 187, 0.08) 62%, transparent 72%);
+  filter: blur(2px);
+}
+
+.visual-anchor-mission {
+  background: linear-gradient(148deg, rgba(15, 24, 44, 0.96), rgba(14, 34, 68, 0.88));
+}
+
+.visual-anchor-attack {
+  background: linear-gradient(148deg, rgba(16, 29, 52, 0.96), rgba(25, 51, 92, 0.88));
+}
+
+.visual-anchor-recovery {
+  background: linear-gradient(148deg, rgba(13, 34, 44, 0.96), rgba(12, 55, 61, 0.88));
+}
+
+.visual-anchor-progress {
+  background: linear-gradient(148deg, rgba(28, 20, 59, 0.96), rgba(23, 47, 88, 0.9));
+}
+
+.visual-anchor-history {
+  background: linear-gradient(148deg, rgba(23, 28, 60, 0.96), rgba(35, 35, 79, 0.9));
+}
+
+.visual-anchor-onboarding {
+  background: linear-gradient(148deg, rgba(27, 28, 63, 0.96), rgba(16, 46, 85, 0.9));
+}
+
+.visual-anchor-coach {
+  background: linear-gradient(148deg, rgba(18, 33, 60, 0.96), rgba(20, 39, 76, 0.9));
 }
 
 @media (prefers-reduced-motion: reduce) {

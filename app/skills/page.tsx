@@ -4,13 +4,7 @@ export const dynamic = 'force-dynamic';
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
-import {
-  confidenceLabel,
-  pct,
-  sortWeakest,
-  weaknessScore,
-  type SkillRow as SharedSkillRow,
-} from "../lib/learningSignals";
+import { confidenceLabel, pct, weaknessScore, type SkillRow as SharedSkillRow } from "../lib/learningSignals";
 import {
   focusedLessonHref,
   focusedPracticeHref,
@@ -24,6 +18,7 @@ import {
   type MovementState,
 } from "../lib/mastery";
 import { useStudentState } from "../lib/useStudentState";
+import { SkillsMapCompanion } from "../components/PageVisualCompanions";
 import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
 
 type Row = SharedSkillRow;
@@ -61,6 +56,30 @@ function sortForExecution(rows: DecoratedRow[]): DecoratedRow[] {
     if ((a.attempts ?? 0) !== (b.attempts ?? 0)) return b.attempts - a.attempts;
     return a.subskill.localeCompare(b.subskill);
   });
+}
+
+function sortForStrength(rows: DecoratedRow[]): DecoratedRow[] {
+  return [...rows].sort((a, b) => {
+    const aMastered = a.mastery === "Mastered" ? 1 : 0;
+    const bMastered = b.mastery === "Mastered" ? 1 : 0;
+    if (aMastered !== bMastered) return bMastered - aMastered;
+    if (pct(a.accuracy) !== pct(b.accuracy)) return pct(b.accuracy) - pct(a.accuracy);
+    if ((a.attempts ?? 0) !== (b.attempts ?? 0)) return b.attempts - a.attempts;
+    return a.subskill.localeCompare(b.subskill);
+  });
+}
+
+function payoffForMastery(state: MasteryState): string {
+  if (state === "Unstable") return "Stabilize this skill to stop active score leakage in the next block.";
+  if (state === "Growing") return "Push this to mastered and lock predictable points.";
+  if (state === "Mastered") return "Maintain this signal while attacking weaker skills.";
+  return "Generate fresh evidence and remove blind spots.";
+}
+
+function signedDelta(delta: number | null): string | null {
+  if (delta === null || !Number.isFinite(delta)) return null;
+  if (delta > 0) return `+${delta}%`;
+  return `${delta}%`;
 }
 
 export default function SkillsPage() {
@@ -120,6 +139,8 @@ export default function SkillsPage() {
     }));
   }, [rows]);
 
+  const executionRows = useMemo(() => sortForExecution(decorated), [decorated]);
+
   const stateCounts = useMemo(() => {
     return {
       Mastered: decorated.filter((row) => row.mastery === "Mastered").length,
@@ -153,30 +174,76 @@ export default function SkillsPage() {
   }, [decorated, query, stateFilter]);
 
   const focusRow = useMemo(() => {
-    const selected = focusKey ? decorated.find((row) => row.key === focusKey) ?? null : null;
+    const selected = focusKey ? executionRows.find((row) => row.key === focusKey) ?? null : null;
     if (selected) return selected;
-    return (
-      sortForExecution(decorated).find((row) => row.mastery === "Unstable") ||
-      sortForExecution(decorated).find((row) => row.mastery === "Growing") ||
-      sortForExecution(decorated)[0] ||
-      null
-    );
-  }, [decorated, focusKey]);
+    return executionRows.find((row) => row.mastery === "Unstable")
+      ?? executionRows.find((row) => row.mastery === "Growing")
+      ?? executionRows[0]
+      ?? null;
+  }, [executionRows, focusKey]);
 
-  const weakest3 = useMemo(() => sortWeakest(rows).slice(0, 3), [rows]);
-
-  const blockedRows = useMemo(() => {
-    return decorated.filter((row) => row.movement === "Stuck").slice(0, 3);
+  const strongestRows = useMemo(() => {
+    return sortForStrength(
+      decorated.filter((row) => row.mastery !== "Untouched" && row.attempts >= 6)
+    ).slice(0, 3);
   }, [decorated]);
 
-  const missionNext = focusRow ? "Lessons" : "Practice";
+  const riskRows = useMemo(() => {
+    return sortForExecution(
+      decorated.filter((row) => row.mastery === "Unstable" || row.movement === "Stuck" || row.movement === "Volatile")
+    ).slice(0, 4);
+  }, [decorated]);
+
+  const missionReason = useMemo(() => {
+    if (!focusRow) return "Choose one subskill and execute immediately.";
+    return `${pct(focusRow.accuracy)}% over ${focusRow.attempts} attempts • ${focusRow.movement} signal`;
+  }, [focusRow]);
+
+  const movementSummary = useMemo(() => {
+    if (!studentState?.recentMovement.latest) {
+      return {
+        tone: "neutral" as const,
+        headline: "No movement proof yet",
+        detail: "Finish one comparable block to unlock stable before/after deltas.",
+      };
+    }
+
+    const delta = studentState.recentMovement.accuracyDelta;
+    const deltaText = signedDelta(delta);
+    if (!deltaText) {
+      return {
+        tone: "neutral" as const,
+        headline: studentState.historyProof.lastSessionLabel,
+        detail: "No comparable prior block yet. Replay similar shape to unlock deltas.",
+      };
+    }
+
+    const gain = studentState.recentMovement.biggestGain
+      ? `${studentState.recentMovement.biggestGain.topic} +${studentState.recentMovement.biggestGain.delta}%`
+      : "No topic gain yet";
+    const drop = studentState.recentMovement.biggestDrop
+      ? `${studentState.recentMovement.biggestDrop.topic} ${studentState.recentMovement.biggestDrop.delta}%`
+      : "No topic drop";
+
+    return {
+      tone: (delta ?? 0) >= 0 ? ("success" as const) : ("danger" as const),
+      headline: `Comparable block change: ${deltaText}`,
+      detail: `${gain} • ${drop}`,
+    };
+  }, [studentState]);
+
+  const strongestLabel = strongestRows[0]
+    ? `${strongestRows[0].subskill} ${pct(strongestRows[0].accuracy)}%`
+    : "No stabilized strengths yet";
+
+  const missionNext = "Practice";
 
   return (
     <main className="min-h-screen">
       <PageHeader
-        label="Mastery command"
+        label="Skills"
         title="Skills"
-        subtitle="Pick one exact subtopic, execute, and verify movement."
+        subtitle="One clear attack, clear evidence, and a fast route back to focused retry."
         right={
           <div className="flex gap-2">
             <button
@@ -206,33 +273,16 @@ export default function SkillsPage() {
       <LoopRail
         active="Skills"
         next={missionNext}
-        note="Use this page as a precision selector, not as a report."
+        note="Attack one skill, run focused retry, then verify movement proof."
       />
 
-      {studentState && (
-        <section className="mb-4 rounded-2xl border border-gray-200 bg-white/92 p-4 shadow-sm sm:mb-5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
-              Unified command
-            </div>
-            <Pill text={`Debt ${studentState.reviewDebt.dueCount}`} tone={studentState.reviewDebt.dueCount > 0 ? "danger" : "success"} />
-          </div>
-          <div className="mt-2 text-sm font-semibold text-black">{studentState.recommendedAction.title}</div>
-          <div className="mt-1 text-xs text-gray-600">{studentState.recommendedAction.reason}</div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:max-w-xl">
-            <SecondaryButton href={studentState.recommendedAction.primaryHref}>
-              {studentState.recommendedAction.primaryLabel}
-            </SecondaryButton>
-            <SecondaryButton href={studentState.recommendedAction.secondaryHref}>
-              {studentState.recommendedAction.secondaryLabel}
-            </SecondaryButton>
-          </div>
-        </section>
-      )}
-
       {loading && (
-        <Card title="Loading…" subtitle="Pulling your mastery map">
-          <div className="text-sm text-gray-600">Please wait.</div>
+        <Card title="Loading skills" subtitle="Pulling your skill map">
+          <div className="space-y-2">
+            <div className="state-skeleton h-3 w-2/3" />
+            <div className="state-skeleton h-3 w-1/2" />
+            <div className="state-skeleton h-24 w-full" />
+          </div>
         </Card>
       )}
 
@@ -247,7 +297,7 @@ export default function SkillsPage() {
       )}
 
       {!loading && !err && rows.length === 0 && (
-        <Card title="No mastery signal yet" subtitle="Run one full set before using diagnostics.">
+        <Card title="No skill data yet" subtitle="Complete a short diagnostic to unlock your skill map.">
           <div className="grid gap-3 sm:grid-cols-2">
             <PrimaryButton href={`/practice?subject=${subject}`}>Start practice (12Q)</PrimaryButton>
             <SecondaryButton href="/today">Back to Today</SecondaryButton>
@@ -258,25 +308,27 @@ export default function SkillsPage() {
       {!loading && !err && rows.length > 0 && (
         <div className="grid gap-5">
           <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
-            <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.2fr_0.8fr]">
+            <div className="p-5 sm:p-6">
               <div>
                 <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
-                  Active focus target
+                  Recommended skill attack
                 </div>
                 {focusRow ? (
                   <>
                     <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
                       {focusRow.subskill}
                     </h2>
-                    <p className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
-                      {focusRow.domain} • {focusRow.skill} • {masteryDescription(focusRow.mastery)}
+                    <p className="mt-2 text-sm text-[#d2dbec]">
+                      {focusRow.domain} • {focusRow.skill}
                     </p>
+                    <p className="mt-2 text-sm text-[#d2dbec]">{missionReason}</p>
+                    <p className="mt-2 text-xs text-[#c2d0ea]">{payoffForMastery(focusRow.mastery)}</p>
                     <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
-                      <PrimaryButton href={focusedPracticeHref(subject, focusRow.subskill, true)}>
-                        Practice this subtopic
+                      <PrimaryButton href={focusedPracticeHref(subject, focusRow.subskill)}>
+                        Start focused retry
                       </PrimaryButton>
                       <SecondaryButton href={focusedLessonHref(focusRow.subskill)}>
-                        Open lesson
+                        Open repair lesson
                       </SecondaryButton>
                     </div>
                   </>
@@ -285,34 +337,93 @@ export default function SkillsPage() {
                 )}
               </div>
 
-              <div className="grid gap-3">
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Unstable now</div>
-                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{stateCounts.Unstable}</div>
-                  <div className="mt-1 text-xs text-[#c5d1e8]">Highest-priority repair queue</div>
-                </div>
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Growing</div>
-                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{stateCounts.Growing}</div>
-                  <div className="mt-1 text-xs text-[#c5d1e8]">Close to stable control</div>
-                </div>
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Mastered</div>
-                  <div className="mt-1 text-3xl font-semibold tracking-tight text-white">{stateCounts.Mastered}</div>
-                  <div className="mt-1 text-xs text-[#c5d1e8]">Maintain with light retests</div>
-                </div>
+              <div className="mt-5">
+                <SkillsMapCompanion
+                  unstable={stateCounts.Unstable}
+                  growing={stateCounts.Growing}
+                  mastered={stateCounts.Mastered}
+                  untouched={stateCounts.Untouched}
+                  movementDelta={studentState?.recentMovement.accuracyDelta ?? null}
+                />
               </div>
             </div>
           </section>
 
-          <Card title="Mastery state map" subtitle="Filter by state, then select one subtopic to execute." accent>
+          <Card title="Performance evidence" subtitle="See clearly where you are strong and where you are leaking points." accent>
+            <div className="grid gap-4 lg:grid-cols-2">
+              <div className="rounded-2xl border border-[#9cdab6] bg-[#eefbf4] p-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#0f8a4e]">Working now</div>
+                <div className="mt-2 grid gap-2">
+                  {strongestRows.length === 0 && (
+                    <div className="rounded-xl border border-[#d4ecd9] bg-white p-3 text-sm text-[#2e6f4a]">
+                      No stabilized subskills yet. Build one anchor with focused reps.
+                    </div>
+                  )}
+                  {strongestRows.map((row) => (
+                    <button
+                      key={`strong-${row.key}`}
+                      onClick={() => setFocusKey(row.key)}
+                      className="rounded-xl border border-[#c8e9d5] bg-white p-3 text-left transition hover:border-[#98d8b7]"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-semibold text-[#0f172a]">{row.subskill}</div>
+                        <Pill text={row.mastery} tone={masteryTone(row.mastery)} />
+                      </div>
+                      <div className="mt-1 text-xs text-[#40644c]">
+                        {pct(row.accuracy)}% • {row.attempts} attempts
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-[#f4c0cb] bg-[#fff3f6] p-4">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#b02039]">At risk now</div>
+                <div className="mt-2 grid gap-2">
+                  {riskRows.length === 0 && (
+                    <div className="rounded-xl border border-[#f2d7de] bg-white p-3 text-sm text-[#84515c]">
+                      No urgent weak rows in this subject right now.
+                    </div>
+                  )}
+                  {riskRows.map((row) => (
+                    <button
+                      key={`risk-${row.key}`}
+                      onClick={() => setFocusKey(row.key)}
+                      className="rounded-xl border border-[#f0d2da] bg-white p-3 text-left transition hover:border-[#e5a9b9]"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-semibold text-[#0f172a]">{row.subskill}</div>
+                        <Pill text={row.mastery} tone={masteryTone(row.mastery)} />
+                      </div>
+                      <div className="mt-1 text-xs text-[#805864]">
+                        {pct(row.accuracy)}% • {row.attempts} attempts • {row.movement}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#546883]">Recent movement proof</div>
+                <Pill text={movementSummary.tone === "danger" ? "Slipping" : movementSummary.tone === "success" ? "Improving" : "Pending proof"} tone={movementSummary.tone} />
+              </div>
+              <div className="mt-2 text-sm font-semibold text-[#0f172a]">{movementSummary.headline}</div>
+              <div className="mt-1 text-xs text-[#5e718f]">{movementSummary.detail}</div>
+              <div className="mt-3 max-w-xs">
+                <SecondaryButton href="/history">Open full movement history</SecondaryButton>
+              </div>
+            </div>
+          </Card>
+
+          <Card title="Skill map and attack lane" subtitle="Pick one row, then execute immediately." accent>
             <div className="grid gap-4">
               <div className="grid gap-3 md:grid-cols-[auto_1fr] md:items-center">
                 <div className="flex flex-wrap gap-2">
                   {(["All", ...MASTERY_ORDER] as const).map((state) => {
                     const active = stateFilter === state;
-                    const count =
-                      state === "All" ? decorated.length : stateCounts[state as MasteryState];
+                    const count = state === "All" ? decorated.length : stateCounts[state];
 
                     return (
                       <button
@@ -343,7 +454,7 @@ export default function SkillsPage() {
                 <div className="grid gap-2">
                   {filtered.length === 0 && (
                     <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-600">
-                      No subskills match the current filter.
+                      No subskills match this filter.
                     </div>
                   )}
 
@@ -384,28 +495,13 @@ export default function SkillsPage() {
                             Confidence <span className="font-semibold text-black">{confidenceLabel(row.attempts)}</span>
                           </div>
                         </div>
-
-                        <div className="mt-3 h-2 rounded-full bg-gray-100">
-                          <div
-                            className={`h-full rounded-full ${
-                              row.mastery === "Mastered"
-                                ? "bg-[#2a9b67]"
-                                : row.mastery === "Growing"
-                                ? "bg-[#4a7fd8]"
-                                : row.mastery === "Unstable"
-                                ? "bg-[#d54768]"
-                                : "bg-gray-400"
-                            }`}
-                            style={{ width: `${Math.max(6, Math.min(100, pct(row.accuracy)))}%` }}
-                          />
-                        </div>
                       </button>
                     );
                   })}
                 </div>
 
                 <Card
-                  title="Focused execution"
+                  title="Selected attack lane"
                   subtitle={focusRow ? movementDescription(focusRow.movement) : "Pick one row from the left."}
                   right={focusRow ? <Pill text={focusRow.mastery} tone={masteryTone(focusRow.mastery)} /> : null}
                   prominence="prominent"
@@ -430,13 +526,19 @@ export default function SkillsPage() {
                       </div>
 
                       <div className="grid gap-3">
-                        <PrimaryButton href={focusedPracticeHref(subject, focusRow.subskill, true)}>
-                          Run focused practice
+                        <PrimaryButton href={focusedPracticeHref(subject, focusRow.subskill)}>
+                          Run focused retry now
                         </PrimaryButton>
                         <SecondaryButton href={focusedLessonHref(focusRow.subskill)}>
                           Open repair lesson
                         </SecondaryButton>
-                        <SecondaryButton href="/review">Open recovery queue</SecondaryButton>
+                        {studentState?.reviewDebt.dueCount ? (
+                          <SecondaryButton href="/review">
+                            Clear review debt ({studentState.reviewDebt.blockSize}Q)
+                          </SecondaryButton>
+                        ) : (
+                          <SecondaryButton href="/history">Verify movement in history</SecondaryButton>
+                        )}
                       </div>
                     </div>
                   ) : (
@@ -446,53 +548,6 @@ export default function SkillsPage() {
               </div>
             </div>
           </Card>
-
-          <div className="grid gap-4 lg:grid-cols-2">
-            <Card title="Most blocked subtopics" subtitle="Where performance is not moving despite volume.">
-              <div className="grid gap-2">
-                {blockedRows.length === 0 && (
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
-                    No subtopic is currently flagged as blocked.
-                  </div>
-                )}
-                {blockedRows.map((row) => (
-                  <button
-                    key={`blocked-${row.key}`}
-                    onClick={() => setFocusKey(row.key)}
-                    className="rounded-xl border border-gray-200 bg-white p-3 text-left transition hover:border-gray-300"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-semibold text-black">{row.subskill}</div>
-                      <Pill text="Stuck" tone="danger" />
-                    </div>
-                    <div className="mt-1 text-xs text-gray-600">
-                      {pct(row.accuracy)}% over {row.attempts} attempts
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </Card>
-
-            <Card title="Immediate repair queue" subtitle="Top execution targets right now.">
-              <div className="grid gap-2">
-                {weakest3.map((row, i) => (
-                  <button
-                    key={`weak-${rowKey(row)}-${i}`}
-                    onClick={() => setFocusKey(rowKey(row))}
-                    className="rounded-xl border border-gray-200 bg-white p-3 text-left transition hover:border-gray-300"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-semibold text-black">{row.subskill}</div>
-                      <div className="text-xs font-semibold text-gray-500">#{i + 1}</div>
-                    </div>
-                    <div className="mt-1 text-xs text-gray-600">
-                      {pct(row.accuracy)}% • {row.attempts} attempts • {confidenceLabel(row.attempts)} confidence
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </Card>
-          </div>
         </div>
       )}
     </main>

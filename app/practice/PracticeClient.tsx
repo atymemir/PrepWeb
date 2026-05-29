@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabase } from "../lib/supabase";
 import { analyzeReviewSession, type SessionAnalysis } from "../lib/sessionAnalysis";
@@ -11,8 +10,6 @@ import { recordAnswerEvent } from "../lib/answerEvents";
 import {
   applyMomentumAnswer,
   createMomentum,
-  createShareText,
-  pointsToNextDivision,
   type EngagementIdentity,
   type EngagementStatus,
   type SessionPayoff,
@@ -27,21 +24,21 @@ import {
   focusedLessonHref,
   focusedPracticeHref,
   masteryFor,
-  masteryTone,
   movementFor,
-  movementTone,
   type MasteryState,
   type MovementState,
 } from "../lib/mastery";
+import { resolveLesson } from "../lib/lessonResolver";
 import { normalizePlanTier, tierDefinition, type PlanTier } from "../lib/productTiers";
 import { useStudentState } from "../lib/useStudentState";
-import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton, StatBox } from "../ui/ui";
+import { buildTopicSnapshots, createClientSessionId } from "../lib/studySessionUtils";
+import { Card, LoopRail, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
 import QuestionActionBlock from "../components/QuestionActionBlock";
-import { SessionPayoffCard } from "../components/EngagementSystem";
 import MathToolsLayer from "../components/MathToolsLayer";
 import StudyFeedbackFX from "../components/StudyFeedbackFX";
 import TestingToolsDock from "../components/TestingToolsDock";
 import ExamFormulaReferenceSheet from "../components/ExamFormulaReferenceSheet";
+import { PracticeAttackCompanion, PracticePayoffCompanion } from "../components/PageVisualCompanions";
 import FloatingDesmosCalculator, {
   type DesktopWindowRect,
   type DesmosSessionState,
@@ -106,23 +103,31 @@ type MasteryProbe = {
   movement: MovementState;
 };
 
-const PRACTICE_MODES: Array<{ key: PracticeMode; label: string; note: string }> = [
-  {
-    key: "trainer",
-    label: "Trainer",
-    note: "Instant feedback. Best for repair and pattern learning.",
-  },
-  {
-    key: "timed",
-    label: "Timed",
-    note: "Per-question timer pressure, with immediate feedback.",
-  },
-  {
-    key: "exam",
-    label: "Exam",
-    note: "Strict block simulation. No feedback until the end.",
-  },
-];
+type ModeIdentity = {
+  label: "Quick Practice" | "Weak Skill Practice" | "Timed Set" | "Full Practice Test" | "Revisit";
+  launchNote: string;
+  finishPayoff: string;
+};
+
+type FinishAction = {
+  id: "review" | "focused_retry" | "repair_lesson" | "replay" | "next_block";
+  label: string;
+  note: string;
+  href?: string;
+  onClick?: () => void;
+};
+
+type StartAttackId = "fresh_signal" | "focused_drill" | "timed_block" | "exam_block" | "revisit";
+
+type StartAttackDescriptor = {
+  id: StartAttackId;
+  label: "Fresh Signal" | "Focused Drill" | "Timed Block" | "Exam Block" | "Revisit";
+  mode: PracticeMode;
+  needsRevisitPool: boolean;
+  requiresSubskill: boolean;
+  whyNow: string;
+  payoff: string;
+};
 
 const DEFAULT_EXAM_CALCULATOR_RECT: DesktopWindowRect = {
   x: 56,
@@ -130,13 +135,6 @@ const DEFAULT_EXAM_CALCULATOR_RECT: DesktopWindowRect = {
   width: 540,
   height: 430,
 };
-
-function createClientSessionId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `sess-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
 
 function normalizePracticeMode(raw: string | null): PracticeMode {
   if (raw === "timed") return "timed";
@@ -226,6 +224,24 @@ function isPracticePoolRpcUnavailable(error: { code?: string; message?: string }
   );
 }
 
+function isMissingRpc(error: { code?: string; message?: string } | null | undefined, rpcName: string): boolean {
+  const message = String(error?.message || "").toLowerCase();
+  return error?.code === "PGRST202" || message.includes(rpcName.toLowerCase());
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+}
+
+function subskillCandidates(rawSubskill: string): string[] {
+  const trimmed = rawSubskill.trim();
+  if (!trimmed) return [];
+  const canonical = resolveLesson(trimmed)?.key?.trim() || trimmed;
+  return [...new Set([trimmed, canonical].filter(Boolean))];
+}
+
 export default function PracticeClient() {
   const router = useRouter();
   const sp = useSearchParams();
@@ -264,8 +280,6 @@ export default function PracticeClient() {
   const [identityStatus, setIdentityStatus] = useState<EngagementStatus | null>(null);
   const [momentum, setMomentum] = useState<SessionMomentum>(() => createMomentum(limit));
   const [sessionPayoff, setSessionPayoff] = useState<SessionPayoff | null>(null);
-  const [shareText, setShareText] = useState("");
-  const [copiedShare, setCopiedShare] = useState(false);
   const [sessionClientId, setSessionClientId] = useState<string>(() => createClientSessionId());
   const [engagementNotice, setEngagementNotice] = useState<string | null>(null);
   const [timingNotice, setTimingNotice] = useState<string | null>(null);
@@ -291,10 +305,12 @@ export default function PracticeClient() {
   const [historySessionId, setHistorySessionId] = useState<string | null>(null);
   const [baselineLastSession, setBaselineLastSession] = useState<EngagementIdentity["lastSession"] | null>(null);
   const [finalAnalysis, setFinalAnalysis] = useState<SessionAnalysis | null>(null);
+  const [sessionDebtBefore, setSessionDebtBefore] = useState<number | null>(null);
   const [postSessionDueCount, setPostSessionDueCount] = useState<number | null>(null);
   const [postSessionMasteryProbe, setPostSessionMasteryProbe] = useState<MasteryProbe | null>(null);
   const [postSessionSignalsNotice, setPostSessionSignalsNotice] = useState<string | null>(null);
   const [examNavigatorOpen, setExamNavigatorOpen] = useState(false);
+  const [examOptionEliminatorMode, setExamOptionEliminatorMode] = useState(false);
   const [planTier, setPlanTier] = useState<PlanTier>("free");
   const [planNotice, setPlanNotice] = useState<string | null>(null);
 
@@ -358,7 +374,7 @@ export default function PracticeClient() {
   }, [answers, repairTopic, subject]);
 
   const repairPracticeHref = repairTopic
-    ? focusedPracticeHref(repairSubject, repairTopic, true)
+    ? focusedPracticeHref(repairSubject, repairTopic)
     : `/practice?subject=${subject}`;
   const repairLessonHref = repairTopic ? focusedLessonHref(repairTopic) : "/lessons";
   const hasMathTools = subject === "Math" || subject === "Combined" || q?.subject === "Math";
@@ -396,57 +412,6 @@ export default function PracticeClient() {
     };
   }, [mode, total, analysis.outcome, repairTopic]);
 
-  const postSessionRoute = useMemo(() => {
-    if (practiceMode === "exam") {
-      if ((postSessionDueCount ?? 0) > 0) {
-        return {
-          primaryLabel: "Clear review queue",
-          primaryHref: "/review",
-          secondaryLabel: repairTopic ? "Run targeted repair" : "Replay exam mode",
-          secondaryHref: repairTopic ? repairPracticeHref : `/practice?subject=${subject}&mode=exam`,
-        };
-      }
-      if (repairTopic) {
-        return {
-          primaryLabel: "Run targeted repair",
-          primaryHref: repairPracticeHref,
-          secondaryLabel: "Open review queue",
-          secondaryHref: "/review",
-        };
-      }
-      return {
-        primaryLabel: "Open review queue",
-        primaryHref: "/review",
-        secondaryLabel: "Run next practice block",
-        secondaryHref: `/practice?subject=${subject}`,
-      };
-    }
-
-    if (repairTopic) {
-      if ((postSessionDueCount ?? 0) > 0) {
-        return {
-          primaryLabel: "Clear review queue",
-          primaryHref: "/review",
-          secondaryLabel: "Run targeted repair",
-          secondaryHref: repairPracticeHref,
-        };
-      }
-      return {
-        primaryLabel: "Run targeted repair",
-        primaryHref: repairPracticeHref,
-        secondaryLabel: "Open lesson",
-        secondaryHref: repairLessonHref,
-      };
-    }
-
-    return {
-      primaryLabel: "Run next set",
-      primaryHref: "",
-      secondaryLabel: "Open review",
-      secondaryHref: "/review",
-    };
-  }, [practiceMode, postSessionDueCount, repairTopic, repairPracticeHref, repairLessonHref, subject]);
-
   const executionDelta = useMemo(() => {
     if (!baselineLastSession) return null;
     return {
@@ -454,6 +419,78 @@ export default function PracticeClient() {
       xpDelta: (sessionPayoff?.totalAwarded ?? momentum.sessionXp) - baselineLastSession.xpAwarded,
     };
   }, [baselineLastSession, analysis.accuracyPct, sessionPayoff?.totalAwarded, momentum.sessionXp]);
+
+  const sessionDebtDelta = useMemo(() => {
+    if (sessionDebtBefore === null || postSessionDueCount === null) return null;
+    return postSessionDueCount - sessionDebtBefore;
+  }, [postSessionDueCount, sessionDebtBefore]);
+
+  const reviewDueNow = postSessionDueCount ?? studentState?.reviewDebt.dueCount ?? 0;
+  const hasReviewPressure = reviewDueNow > 0;
+  const replayIsUseful = Boolean(
+    historySessionId &&
+      (practiceMode === "exam" || analysis.outcome !== "advance" || (executionDelta?.accuracyDelta ?? 0) < 0)
+  );
+
+  let primaryFinishAction: FinishAction;
+  const finishSecondaryActions: FinishAction[] = [];
+
+  if (hasReviewPressure) {
+    primaryFinishAction = {
+      id: "review",
+      label: `Clear ${Math.min(reviewDueNow, 12)} review items`,
+      note: `${reviewDueNow} mistake${reviewDueNow === 1 ? "" : "s"} now wait in review. Clear this queue first to avoid carrying errors forward.`,
+      href: "/review",
+    };
+
+    if (repairTopic) {
+      finishSecondaryActions.push({
+        id: "focused_retry",
+        label: `Focused retry: ${repairTopic}`,
+        note: "Retest the surfaced weak topic after clearing review.",
+        href: repairPracticeHref,
+      });
+      finishSecondaryActions.push({
+        id: "repair_lesson",
+        label: "Open repair lesson",
+        note: "Patch the weak pattern before your retry.",
+        href: repairLessonHref,
+      });
+    }
+  } else if (repairTopic) {
+    primaryFinishAction = {
+      id: "focused_retry",
+      label: `Retry ${repairTopic}`,
+      note: "Attack the weak topic immediately while the error pattern is fresh.",
+      href: repairPracticeHref,
+    };
+    finishSecondaryActions.push({
+      id: "repair_lesson",
+      label: "Open repair lesson",
+      note: "Use the lesson to repair this exact weakness before retry.",
+      href: repairLessonHref,
+    });
+  } else {
+    primaryFinishAction = {
+      id: "next_block",
+      label: "Run next practice block",
+      note: "No dominant weak topic surfaced, so extend the signal with one more clean set.",
+      onClick: () => {
+        void ensureAuthAndLoad();
+      },
+    };
+  }
+
+  if (replayIsUseful && historySessionId && finishSecondaryActions.length < 2) {
+    finishSecondaryActions.push({
+      id: "replay",
+      label: "Replay this result",
+      note: "Use replay only when you need direct before/after proof.",
+      href: `/history?session=${encodeURIComponent(historySessionId)}`,
+    });
+  }
+
+  const cappedSecondaryActions = finishSecondaryActions.slice(0, 2);
 
   function optionText(letter: string) {
     if (!q) return "";
@@ -505,6 +542,12 @@ export default function PracticeClient() {
 
   function pick(letter: string) {
     if (locked || saving) return;
+    if (practiceMode === "exam" && examOptionEliminatorMode) {
+      if (letter === "A" || letter === "B" || letter === "C" || letter === "D") {
+        toggleOptionElimination(letter);
+      }
+      return;
+    }
     if (q && eliminatedOptionsByQuestion[q.id]?.[letter as OptionLetter]) {
       setEliminatedOptionsByQuestion((prev) => {
         const current = prev[q.id];
@@ -519,9 +562,13 @@ export default function PracticeClient() {
       });
     }
     setSelected(letter);
+    if (practiceMode === "exam" && q && (letter === "A" || letter === "B" || letter === "C" || letter === "D")) {
+      setExamDraftAnswers((prev) => ({ ...prev, [q.id]: letter }));
+      setExamSubmitPanelOpen(false);
+    }
   }
 
-  function toggleOptionElimination(letter: OptionLetter) {
+  const toggleOptionElimination = useCallback((letter: OptionLetter) => {
     if (!q || saving) return;
 
     const questionId = q.id;
@@ -550,9 +597,38 @@ export default function PracticeClient() {
         });
       }
     }
-  }
+  }, [practiceMode, q, saving, selected]);
 
-  function openToolSurface() {
+  const toggleExamDraftSelection = useCallback((letter: OptionLetter) => {
+    if (practiceMode !== "exam" || !q || saving) return;
+
+    setEliminatedOptionsByQuestion((prev) => {
+      const current = prev[q.id];
+      if (!current || !current[letter]) return prev;
+      return {
+        ...prev,
+        [q.id]: {
+          ...current,
+          [letter]: false,
+        },
+      };
+    });
+
+    setExamDraftAnswers((prev) => {
+      const next = { ...prev };
+      if (next[q.id] === letter) {
+        delete next[q.id];
+        setSelected(null);
+      } else {
+        next[q.id] = letter;
+        setSelected(letter);
+      }
+      return next;
+    });
+    setExamSubmitPanelOpen(false);
+  }, [practiceMode, q, saving]);
+
+  const openToolSurface = useCallback(() => {
     if (toolProfile === "testing") {
       setExamToolsUi((prev) => ({
         ...prev,
@@ -562,42 +638,42 @@ export default function PracticeClient() {
       return;
     }
     setToolsOpen(true);
-  }
+  }, [toolProfile]);
 
-  function closeExamCalculator() {
+  const closeExamCalculator = useCallback(() => {
     setExamToolsUi((prev) => ({
       ...prev,
       calculatorOpen: false,
       calculatorMinimized: false,
     }));
-  }
+  }, []);
 
-  function minimizeExamCalculator() {
+  const minimizeExamCalculator = useCallback(() => {
     setExamToolsUi((prev) => {
       if (!prev.calculatorOpen) return prev;
       return { ...prev, calculatorMinimized: true };
     });
-  }
+  }, []);
 
-  function restoreExamCalculator() {
+  const restoreExamCalculator = useCallback(() => {
     setExamToolsUi((prev) => ({
       ...prev,
       calculatorOpen: true,
       calculatorMinimized: false,
     }));
-  }
+  }, []);
 
-  function toggleExamReference() {
+  const toggleExamReference = useCallback(() => {
     setExamToolsUi((prev) => ({
       ...prev,
       referenceOpen: !prev.referenceOpen,
     }));
-  }
+  }, []);
 
-  function toggleExamMarkCurrent() {
+  const toggleExamMarkCurrent = useCallback(() => {
     if (!q) return;
     setExamMarked((prev) => ({ ...prev, [q.id]: !prev[q.id] }));
-  }
+  }, [q]);
 
   async function ensureAuthAndLoad() {
     setLoading(true);
@@ -653,8 +729,8 @@ export default function PracticeClient() {
       }
       setPoolNotice(null);
 
-      const usesFreshPool = !subskill && !includeSeen;
-      const usesRevisitPool = !usesFreshPool;
+      const usesRevisitPool = includeSeen;
+      const usesFreshPool = !usesRevisitPool;
       const fallbackFetchLimit = Math.max(limit * 6, 72);
       let disciplineFallbackNoted = false;
 
@@ -833,23 +909,39 @@ export default function PracticeClient() {
         list = mixed.slice(0, limit);
       } else {
         let nextList: Question[] | null = null;
-        const targetSubskill = subskill || null;
+        const targetSubskillKeys = subskillCandidates(subskill);
+        const targetSubskills = targetSubskillKeys.length ? targetSubskillKeys : [null];
 
         if (usesFreshPool || usesRevisitPool) {
-          nextList = await fetchDisciplinedPool({
-            targetSubject: subject,
-            targetSubskill,
-            targetLimit: limit,
-            mode: usesFreshPool ? "fresh" : "revisit",
-          });
+          for (const targetSubskill of targetSubskills) {
+            const candidate = await fetchDisciplinedPool({
+              targetSubject: subject,
+              targetSubskill,
+              targetLimit: limit,
+              mode: usesFreshPool ? "fresh" : "revisit",
+            });
+            if (candidate && candidate.length > 0) {
+              nextList = candidate;
+              break;
+            }
+            if (!nextList) nextList = candidate;
+          }
         }
 
         if (!nextList) {
-          const base = await fetchQuestions({
-            targetSubject: subject,
-            targetSubskill,
-            targetLimit: fallbackFetchLimit,
-          });
+          let base: Question[] = [];
+          for (const targetSubskill of targetSubskills) {
+            const candidate = await fetchQuestions({
+              targetSubject: subject,
+              targetSubskill,
+              targetLimit: fallbackFetchLimit,
+            });
+            if (candidate.length > 0) {
+              base = candidate;
+              break;
+            }
+            if (!base.length) base = candidate;
+          }
           let filtered = base;
 
           if (usesFreshPool) {
@@ -879,7 +971,7 @@ export default function PracticeClient() {
       }
       if (!list.length && usesRevisitPool) {
         throw new Error(
-          "No revisit questions are currently available for this filter. Run fresh mode or clear review debt first."
+          "No revisit questions are available for this filter yet. Run fresh mode or clear your review queue first."
         );
       }
       if (!list.length) throw new Error("No questions returned for this filter.");
@@ -898,11 +990,10 @@ export default function PracticeClient() {
       setAnswers({});
       setMomentum(createMomentum(list.length || limit));
       setSessionPayoff(null);
-      setShareText("");
-      setCopiedShare(false);
       setSessionClientId(createClientSessionId());
       setHistorySessionId(null);
       setFinalAnalysis(null);
+      setSessionDebtBefore(null);
       setPostSessionDueCount(null);
       setPostSessionMasteryProbe(null);
       setPostSessionSignalsNotice(null);
@@ -920,6 +1011,7 @@ export default function PracticeClient() {
       setExamNavFilter("all");
       setExamSubmitPanelOpen(false);
       setExamNavigatorOpen(false);
+      setExamOptionEliminatorMode(false);
       setExamStartedAtMs(Date.now());
       resetQuestionUI();
       resetTimingState();
@@ -965,18 +1057,75 @@ export default function PracticeClient() {
     router.replace(`/practice?${params.toString()}`);
   }
 
+  function switchAttackPath(nextAttack: StartAttackId) {
+    if (nextAttack === "exam_block" && !tier.limits.examMode) {
+      router.push("/pricing");
+      return;
+    }
+
+    const params = new URLSearchParams(sp.toString());
+
+    if (nextAttack === "fresh_signal") {
+      setPracticeMode("trainer");
+      params.set("mode", "trainer");
+      params.delete("subskill");
+      params.delete("revisit");
+      router.push(`/practice?${params.toString()}`);
+      return;
+    }
+
+    if (nextAttack === "timed_block") {
+      setPracticeMode("timed");
+      params.set("mode", "timed");
+      params.delete("subskill");
+      params.delete("revisit");
+      router.push(`/practice?${params.toString()}`);
+      return;
+    }
+
+    if (nextAttack === "exam_block") {
+      setPracticeMode("exam");
+      params.set("mode", "exam");
+      params.delete("subskill");
+      params.delete("revisit");
+      router.push(`/practice?${params.toString()}`);
+      return;
+    }
+
+    if (nextAttack === "revisit") {
+      setPracticeMode("trainer");
+      params.set("mode", "trainer");
+      params.delete("subskill");
+      params.set("revisit", "1");
+      router.push(`/practice?${params.toString()}`);
+      return;
+    }
+
+    const weakest = studentState?.weakestSkill;
+    setPracticeMode("trainer");
+    params.set("mode", "trainer");
+    params.delete("revisit");
+    if (weakest) {
+      params.set("subject", weakest.subject);
+      params.set("subskill", weakest.subskill);
+    } else {
+      params.delete("subskill");
+    }
+
+    router.push(`/practice?${params.toString()}`);
+  }
+
   function startSession() {
     setMode("in_session");
     setIdx(0);
     setAnswers({});
     setMomentum(createMomentum(questions.length || limit));
     setSessionPayoff(null);
-    setShareText("");
-    setCopiedShare(false);
     setSessionClientId(createClientSessionId());
     setHistorySessionId(null);
     setBaselineLastSession(identity?.lastSession ?? null);
     setFinalAnalysis(null);
+    setSessionDebtBefore(studentState?.reviewDebt.dueCount ?? null);
     setPostSessionDueCount(null);
     setPostSessionMasteryProbe(null);
     setPostSessionSignalsNotice(null);
@@ -994,28 +1143,10 @@ export default function PracticeClient() {
     setExamNavFilter("all");
     setExamSubmitPanelOpen(false);
     setExamNavigatorOpen(false);
+    setExamOptionEliminatorMode(false);
     setExamStartedAtMs(Date.now());
     resetQuestionUI();
     resetTimingState();
-  }
-
-  function buildTopicSnapshots(source: Record<string, AnswerInsert>) {
-    const buckets = new Map<string, { subject: string | null; correct: number; total: number }>();
-    for (const answer of Object.values(source)) {
-      const key = (answer.topic?.trim() || "Unknown");
-      if (!buckets.has(key)) {
-        buckets.set(key, { subject: answer.subject || null, correct: 0, total: 0 });
-      }
-      const bucket = buckets.get(key)!;
-      bucket.total += 1;
-      if (answer.is_correct) bucket.correct += 1;
-    }
-    return [...buckets.entries()].map(([topic, value]) => ({
-      topic,
-      subject: value.subject,
-      correctCount: value.correct,
-      totalCount: value.total,
-    }));
   }
 
   const hydratePostSessionSignals = useCallback(async (args: {
@@ -1029,9 +1160,18 @@ export default function PracticeClient() {
     const supabase = getSupabase();
 
     try {
-      const dueRes = await supabase.rpc("get_due_review_questions", { p_limit: 120 });
-      if (dueRes.error) throw new Error(dueRes.error.message);
-      setPostSessionDueCount(((dueRes.data ?? []) as Array<{ id: string }>).length);
+      const countRes = await supabase.rpc("get_due_review_count", { p_scan: 2000 });
+      if (countRes.error) {
+        if (isMissingRpc(countRes.error, "get_due_review_count")) {
+          const dueRes = await supabase.rpc("get_due_review_questions", { p_limit: 240 });
+          if (dueRes.error) throw new Error(dueRes.error.message);
+          setPostSessionDueCount(((dueRes.data ?? []) as Array<{ id: string }>).length);
+        } else {
+          throw new Error(countRes.error.message);
+        }
+      } else {
+        setPostSessionDueCount(Math.max(0, Number(countRes.data ?? 0)));
+      }
     } catch (e: unknown) {
       setPostSessionDueCount(null);
       setPostSessionSignalsNotice(errorMessage(e, "Post-session due queue snapshot is unavailable."));
@@ -1119,19 +1259,6 @@ export default function PracticeClient() {
       setSessionPayoff(applied.payoff);
       setEngagementNotice(null);
 
-      setShareText(
-        createShareText({
-          nickname: "Student",
-          mode: practiceMode === "exam" ? "practice" : "practice",
-          correct,
-          answered,
-          accuracyPct: applied.payoff.accuracyPct,
-          streakDays: applied.identity.streakDays,
-          level: applied.status.level,
-          division: applied.status.division.label,
-        })
-      );
-
       const history = await recordStudySession({
         clientSessionId: sessionClientId,
         mode: practiceMode === "exam" ? "exam" : "practice",
@@ -1145,7 +1272,36 @@ export default function PracticeClient() {
         outcome: sourceAnalysis.outcome,
         scoreBandLow: scoreBand.low,
         scoreBandHigh: scoreBand.high,
-        topics: buildTopicSnapshots(source),
+        topics: buildTopicSnapshots(
+          Object.values(source).map((answer) => ({
+            subject: answer.subject,
+            topic: answer.topic,
+            correct: answer.is_correct,
+          }))
+        ),
+        questions: questions
+          .map((question, position) => {
+            const answer = source[question.id];
+            if (!answer) return null;
+            return {
+              questionId: question.id,
+              position: position + 1,
+              subject: answer.subject || question.subject || null,
+              topic: answer.topic ?? question.topic ?? null,
+              questionText: question.question_text,
+              optionA: question.option_a,
+              optionB: question.option_b,
+              optionC: question.option_c,
+              optionD: question.option_d,
+              correctOption: String(question.correct_option || "").toUpperCase(),
+              selectedOption: String(answer.selected_option || "").toUpperCase(),
+              isCorrect: !!answer.is_correct,
+              isReview: false,
+              timeTakenSeconds: Math.max(0, Math.round(answer.time_taken_seconds || 0)),
+              explanation: question.explanation ?? null,
+            };
+          })
+          .filter((item): item is NonNullable<typeof item> => !!item),
       });
       setHistorySessionId(history.sessionId);
       await hydratePostSessionSignals({ source, sourceAnalysis });
@@ -1163,7 +1319,7 @@ export default function PracticeClient() {
       referenceOpen: false,
     }));
     void refreshStudentState();
-  }, [answers, sessionClientId, total, practiceMode, subject, subskill, examStartedAtMs, scoreBand.low, scoreBand.high, hydratePostSessionSignals, refreshStudentState]);
+  }, [answers, sessionClientId, total, practiceMode, subject, subskill, examStartedAtMs, scoreBand.low, scoreBand.high, hydratePostSessionSignals, questions, refreshStudentState]);
 
   const finalizeExamSession = useCallback(async (args?: { forceAutoFill?: boolean }) => {
     if (!questions.length || saving) return;
@@ -1404,6 +1560,122 @@ export default function PracticeClient() {
     return () => window.clearTimeout(timer);
   }, [mode, practiceMode, examSecondsLeft, saving, finalizeExamSession]);
 
+  useEffect(() => {
+    if (mode !== "in_session") return;
+    if (practiceMode !== "exam") return;
+
+    const letterForDigit = (digit: string): OptionLetter | null => {
+      if (digit === "1") return "A";
+      if (digit === "2") return "B";
+      if (digit === "3") return "C";
+      if (digit === "4") return "D";
+      return null;
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return;
+      if (saving) return;
+      if (!q) return;
+
+      const key = event.key;
+      const lower = key.toLowerCase();
+      const isWinCtrlAlt = event.ctrlKey && event.altKey && !event.metaKey;
+      const isMacCmdOpt = event.metaKey && event.altKey && !event.ctrlKey;
+      const isMacCmdCtrl = event.metaKey && event.ctrlKey && !event.altKey;
+
+      // Mark for Review: Windows Ctrl+Alt+V, Mac Cmd+Shift+V.
+      if (
+        (isWinCtrlAlt && lower === "v") ||
+        (event.metaKey && event.shiftKey && !event.ctrlKey && !event.altKey && lower === "v")
+      ) {
+        event.preventDefault();
+        toggleExamMarkCurrent();
+        return;
+      }
+
+      // Calculator: Windows Ctrl+Alt+C, Mac Cmd+Opt+C.
+      if ((isWinCtrlAlt && lower === "c") || (isMacCmdOpt && lower === "c")) {
+        event.preventDefault();
+        if (hasMathTools) openToolSurface();
+        return;
+      }
+
+      // Reference: Windows Ctrl+Alt+R, Mac Cmd+Opt+R.
+      if ((isWinCtrlAlt && lower === "r") || (isMacCmdOpt && lower === "r")) {
+        event.preventDefault();
+        toggleExamReference();
+        return;
+      }
+
+      // Option Eliminator Mode: Windows Ctrl+Alt+O, Mac Cmd+Ctrl+O.
+      if ((isWinCtrlAlt && lower === "o") || (isMacCmdCtrl && lower === "o")) {
+        event.preventDefault();
+        setExamOptionEliminatorMode((prev) => !prev);
+        return;
+      }
+
+      // Select/Deselect choices: Windows Ctrl+Shift+1..4, Mac Cmd+Ctrl+1..4.
+      const selectChord =
+        (event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey) ||
+        (event.metaKey && event.ctrlKey && !event.altKey && !event.shiftKey);
+      if (selectChord) {
+        const letter = letterForDigit(key);
+        if (letter) {
+          event.preventDefault();
+          if (examOptionEliminatorMode) {
+            toggleOptionElimination(letter);
+          } else {
+            toggleExamDraftSelection(letter);
+          }
+          return;
+        }
+      }
+
+      // Eliminate choices: Windows Ctrl+Alt+1..4, Mac Cmd+Opt+1..4.
+      if (isWinCtrlAlt || isMacCmdOpt) {
+        const letter = letterForDigit(key);
+        if (letter) {
+          event.preventDefault();
+          toggleOptionElimination(letter);
+          return;
+        }
+      }
+
+      // Nav: Windows Ctrl+Alt+B/X, Mac Cmd+Ctrl+B/X.
+      if ((isWinCtrlAlt && lower === "b") || (isMacCmdCtrl && lower === "b")) {
+        event.preventDefault();
+        jumpToPreviousQuestion();
+        return;
+      }
+      if ((isWinCtrlAlt && lower === "x") || (isMacCmdCtrl && lower === "x")) {
+        event.preventDefault();
+        if (idx < questions.length - 1) {
+          jumpToQuestion(idx + 1);
+        }
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    examOptionEliminatorMode,
+    hasMathTools,
+    idx,
+    jumpToPreviousQuestion,
+    jumpToQuestion,
+    mode,
+    openToolSurface,
+    practiceMode,
+    q,
+    questions.length,
+    saving,
+    toggleExamReference,
+    toggleOptionElimination,
+    toggleExamMarkCurrent,
+    toggleExamDraftSelection,
+  ]);
+
   async function generateAiExplanation() {
     if (!q || !selected || aiExplainLoading) return;
     setAiExplainLoading(true);
@@ -1454,18 +1726,6 @@ export default function PracticeClient() {
     resetQuestionUI();
   }
 
-  async function copyShareResult() {
-    if (!shareText) return;
-
-    try {
-      await navigator.clipboard.writeText(shareText);
-      setCopiedShare(true);
-      window.setTimeout(() => setCopiedShare(false), 1600);
-    } catch {
-      setCopiedShare(false);
-    }
-  }
-
   const subjectSummary =
     subject === "Combined"
       ? "Reading + Math mixed"
@@ -1473,14 +1733,56 @@ export default function PracticeClient() {
       ? `${subject} targeted run`
       : `${subject} focus`;
 
+  const modeIdentity = useMemo<ModeIdentity>(() => {
+    if (practiceMode === "exam") {
+      return {
+        label: "Full Practice Test",
+        launchNote: "Exam-style block with section navigation and delayed feedback.",
+        finishPayoff: "Shows performance under realistic time pressure and highlights weak topics to review.",
+      };
+    }
+
+    if (practiceMode === "timed") {
+      return {
+        label: "Timed Set",
+        launchNote: "Per-question timing to test execution under pace.",
+        finishPayoff: "Shows whether your skill stays stable under time pressure.",
+      };
+    }
+
+    if (subskill) {
+      return {
+        label: "Weak Skill Practice",
+        launchNote: "Target one specific weak area and close the gap.",
+        finishPayoff: "Creates clear evidence on whether that weak area is improving.",
+      };
+    }
+
+    if (includeSeen) {
+      return {
+        label: "Revisit",
+        launchNote: "Replay seen items intentionally to stabilize patterns before new volume.",
+        finishPayoff: "Confirms whether previous mistakes are actually fixed.",
+      };
+    }
+
+    return {
+      label: "Quick Practice",
+      launchNote: "Start with fresh questions to find what needs attention now.",
+      finishPayoff: "Creates clean evidence for Today, Review, Skills, and Coach.",
+    };
+  }, [includeSeen, practiceMode, subskill]);
+
   const poolModeLabel = subskill
-    ? "Targeted revisit"
+    ? includeSeen
+      ? "Targeted revisit"
+      : "Targeted fresh"
     : includeSeen
     ? "Explicit revisit"
     : "Fresh pool";
 
   const modeLabel =
-    practiceMode === "trainer" ? "Trainer" : practiceMode === "timed" ? "Timed" : "Exam";
+    practiceMode === "trainer" ? "Quick Practice" : practiceMode === "timed" ? "Timed Set" : "Full Practice Test";
 
   const modePill =
     practiceMode === "timed"
@@ -1496,22 +1798,111 @@ export default function PracticeClient() {
       ? "neutral"
       : "accent";
 
-  const modeExecutionIdentity =
-    practiceMode === "trainer"
-      ? "Immediate feedback, explanation, and rapid correction."
-      : practiceMode === "timed"
-      ? "Per-question pressure with enforced locks and no drifting."
-      : "Strict SAT-like block: save answers, review navigator, submit once.";
-
-  const estimatedBlockMinutes = useMemo(() => {
+  const estimateBlockMinutesForMode = useCallback((candidateMode: PracticeMode) => {
     if (!questions.length) return 0;
-    if (practiceMode === "exam") return Math.max(1, Math.round(examTimeLimitSeconds(questions) / 60));
-    if (practiceMode === "timed") {
+    if (candidateMode === "exam") return Math.max(1, Math.round(examTimeLimitSeconds(questions) / 60));
+    if (candidateMode === "timed") {
       const baseSubject = subject === "Combined" ? "Combined" : subject;
       return Math.max(1, Math.round((questionTimeLimitSeconds(baseSubject) * questions.length) / 60));
     }
     return Math.max(1, Math.round((questions.length * 78) / 60));
-  }, [practiceMode, questions, subject]);
+  }, [questions, subject]);
+
+  const startAttackId = useMemo<StartAttackId>(() => {
+    if (subskill) return "focused_drill";
+    if (includeSeen) return "revisit";
+    if (practiceMode === "exam") return "exam_block";
+    if (practiceMode === "timed") return "timed_block";
+    return "fresh_signal";
+  }, [includeSeen, practiceMode, subskill]);
+
+  const startAttack = useMemo<StartAttackDescriptor>(() => {
+    const weakest = studentState?.weakestSkill;
+    const shortReason =
+      studentState?.recommendedAction.reason?.split(". ")[0]?.trim() || "";
+
+    if (startAttackId === "focused_drill") {
+      return {
+        id: "focused_drill",
+        label: "Focused Drill",
+        mode: "trainer",
+        needsRevisitPool: false,
+        requiresSubskill: true,
+        whyNow: subskill
+          ? `${subject} ${subskill} is explicitly targeted right now${includeSeen ? " in revisit mode." : " in fresh mode."}`
+          : weakest
+          ? `Weakest active skill is ${weakest.subskill} at ${weakest.accuracyPct}% over ${weakest.attempts} attempts.`
+          : "A single topic needs direct repair before adding more range.",
+        payoff: "Converts one weak topic into measurable improvement fast.",
+      };
+    }
+
+    if (startAttackId === "revisit") {
+      return {
+        id: "revisit",
+        label: "Revisit",
+        mode: "trainer",
+        needsRevisitPool: true,
+        requiresSubskill: false,
+        whyNow: "Revisit confirms whether prior misses are truly fixed before new volume.",
+        payoff: "Locks retention and reduces repeat mistakes.",
+      };
+    }
+
+    if (startAttackId === "timed_block") {
+      return {
+        id: "timed_block",
+        label: "Timed Block",
+        mode: "timed",
+        needsRevisitPool: false,
+        requiresSubskill: false,
+        whyNow: shortReason || "You need pacing evidence under pressure, not just untimed accuracy.",
+        payoff: "Reveals timing leaks and stability under pace.",
+      };
+    }
+
+    if (startAttackId === "exam_block") {
+      return {
+        id: "exam_block",
+        label: "Exam Block",
+        mode: "exam",
+        needsRevisitPool: false,
+        requiresSubskill: false,
+        whyNow: "Best for full-run readiness with strict SAT-style execution constraints.",
+        payoff: "Gives full-pressure readiness signal and weak-zone exposure.",
+      };
+    }
+
+    return {
+      id: "fresh_signal",
+      label: "Fresh Signal",
+      mode: "trainer",
+      needsRevisitPool: false,
+      requiresSubskill: false,
+      whyNow: shortReason || "Fresh unseen questions are the cleanest way to surface your next weak area.",
+      payoff: "Creates clean evidence for your next decision.",
+    };
+  }, [includeSeen, startAttackId, studentState?.weakestSkill, studentState?.recommendedAction.reason, subskill, subject]);
+
+  const startAttackTarget = useMemo(() => {
+    if (subskill) return `${subject} • ${subskill}`;
+    if (studentState?.weakestSkill && startAttack.id === "focused_drill") {
+      return `${studentState.weakestSkill.subject} • ${studentState.weakestSkill.subskill}`;
+    }
+    if (subject === "Combined") return "Reading + Math";
+    return subject;
+  }, [startAttack.id, studentState?.weakestSkill, subskill, subject]);
+
+  const startAttackRecommendedMinutes = useMemo(() => {
+    return estimateBlockMinutesForMode(startAttack.mode);
+  }, [estimateBlockMinutesForMode, startAttack.mode]);
+
+  const startAttackIsActive =
+    (startAttack.id === "focused_drill" && !!subskill) ||
+    (startAttack.id === "revisit" && includeSeen && !subskill) ||
+    (startAttack.id === "timed_block" && practiceMode === "timed" && !subskill && !includeSeen) ||
+    (startAttack.id === "exam_block" && practiceMode === "exam" && !subskill && !includeSeen) ||
+    (startAttack.id === "fresh_signal" && practiceMode === "trainer" && !subskill && !includeSeen);
 
   const momentumStateLabel = useMemo(() => {
     if (momentum.energy >= 82) return "Locked momentum";
@@ -1538,6 +1929,8 @@ export default function PracticeClient() {
     return [...grouped.values()];
   }, [practiceMode, questions, examDraftAnswers, examMarked]);
 
+  const compactExamShell = practiceMode === "exam" && !examNavigatorOpen && !examSubmitPanelOpen;
+
   return (
     <main className="min-h-screen">
       <StudyFeedbackFX
@@ -1551,13 +1944,9 @@ export default function PracticeClient() {
         intensity="subtle"
       />
       <PageHeader
-        label={subskill ? "Targeted training" : "Fresh practice"}
+        label="Practice"
         title="Practice"
-        subtitle={
-          subskill
-            ? `${subjectSummary} • ${modeLabel} mode • ${poolModeLabel} • focused on ${subskill}`
-            : `${subjectSummary} • ${modeLabel} mode • ${poolModeLabel} • focused 12-question session`
-        }
+        subtitle={`${subjectSummary} • ${modeIdentity.launchNote}`}
         right={
           <button
             className="text-sm font-semibold text-gray-600 hover:text-black underline"
@@ -1571,13 +1960,17 @@ export default function PracticeClient() {
       {!loading && !err && (
         <LoopRail
           active="Practice"
-          note="Practice creates signal. Review decides what must come back."
+          note="Start fast. Finish the set. Review mistakes before moving on."
         />
       )}
 
       {loading && (
-        <Card title="Loading…" subtitle="Preparing your session">
-          <div className="text-sm text-gray-600">Please wait.</div>
+        <Card title="Loading practice" subtitle="Preparing your session">
+          <div className="space-y-2">
+            <div className="state-skeleton h-3 w-2/3" />
+            <div className="state-skeleton h-3 w-1/2" />
+            <div className="state-skeleton h-24 w-full" />
+          </div>
         </Card>
       )}
 
@@ -1600,247 +1993,162 @@ export default function PracticeClient() {
           )}
 
           <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
-            <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[1.25fr_0.75fr]">
+            <div className="grid gap-6 p-5 sm:p-6 lg:grid-cols-[1.2fr_0.8fr]">
               <div>
                 <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
-                  Session launchpad
+                  Recommended attack
                 </div>
-                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">Commit to one full block</h2>
-                <p className="mt-2 text-sm text-[#d2dbec]">Pick pressure mode, then finish without context switching.</p>
+                <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">{startAttack.label}</h2>
+                <p className="mt-2 text-sm text-[#d2dbec]">Why now: {startAttack.whyNow}</p>
+                <div className="mt-2 text-xs text-[#c8d4ed]">Expected payoff: {startAttack.payoff}</div>
 
-                <div className="mt-5 grid gap-3 md:grid-cols-3">
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
+                    Subject: <span className="font-semibold text-white">{subject}</span>
+                  </div>
+                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
+                    Target: <span className="font-semibold text-white">{startAttackTarget}</span>
+                  </div>
+                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
+                    Run time: <span className="font-semibold text-white">{startAttackRecommendedMinutes}m</span>
+                  </div>
+                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
+                    Question pack: <span className="font-semibold text-white">{questions.length}</span>
+                  </div>
+                </div>
+
+                <div className="mt-5 max-w-sm">
+                  <button
+                    onClick={startSession}
+                    className="inline-flex w-full items-center justify-center rounded-xl bg-white px-4 py-3 text-sm font-semibold text-[#0f1b33] transition hover:bg-[#ecf3ff]"
+                  >
+                    {startAttackIsActive ? "Start attack" : "Start current selection"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid gap-3">
+                <div className="rounded-2xl border border-white/20 bg-white/10 p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#bdd5ff]">Other attack paths</div>
+                  <div className="mt-2 grid gap-2">
+                    {([
+                      { id: "fresh_signal", label: "Fresh Signal", note: "Unseen questions for the next weak signal." },
+                      { id: "focused_drill", label: "Focused Drill", note: "One subskill, immediate repair." },
+                      { id: "timed_block", label: "Timed Block", note: "Pace pressure signal." },
+                      { id: "exam_block", label: "Exam Block", note: "Strict SAT block." },
+                      { id: "revisit", label: "Revisit", note: "Replay to confirm fixes." },
+                    ] as const).map((attack) => {
+                      const active = startAttack.id === attack.id;
+                      const locked = attack.id === "exam_block" && !tier.limits.examMode;
+
+                      return (
+                        <button
+                          key={attack.id}
+                          onClick={() => switchAttackPath(attack.id)}
+                          disabled={locked}
+                          className={[
+                            "rounded-lg border px-3 py-2 text-left transition disabled:cursor-not-allowed",
+                            active
+                              ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33]"
+                              : locked
+                              ? "border-[#4a5a7a] bg-white/5 text-[#8fa2c4] opacity-70"
+                              : "border-[#4b628f] bg-white/10 text-[#d8e4fb] hover:bg-white/15",
+                          ].join(" ")}
+                        >
+                          <div className="text-xs font-semibold">
+                            {attack.label}
+                            {locked && <span className="ml-1 text-[10px] uppercase tracking-[0.12em]">Pro+</span>}
+                          </div>
+                          <div className={`mt-1 text-[11px] ${active ? "text-[#23375d]" : "text-[#cfdbf3]"}`}>{attack.note}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t border-white/10 px-5 py-5 sm:px-6">
+              <PracticeAttackCompanion
+                modeLabel={startAttack.label}
+                targetLabel={startAttackTarget}
+                minutes={startAttackRecommendedMinutes}
+                questionCount={questions.length}
+                reviewDue={studentState?.reviewDebt.dueCount ?? 0}
+              />
+            </div>
+
+            <div className="border-t border-white/10 bg-black/10 p-4 sm:px-6">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Secondary controls</div>
+              <div className="mt-3 grid gap-4 lg:grid-cols-[1fr_auto]">
+                <div className="grid gap-2 sm:grid-cols-3">
                   {(["Reading", "Math", "Combined"] as const).map((option) => {
                     const active = subject === option;
-                    const note =
-                      option === "Reading"
-                        ? "Reading-only block"
-                        : option === "Math"
-                        ? "Math-only block"
-                        : "Mixed Reading + Math block";
-
                     return (
                       <button
                         key={option}
                         onClick={() => switchSubject(option)}
                         className={[
-                          "rounded-xl border p-4 text-left transition",
+                          "rounded-lg border px-3 py-2 text-left text-xs font-semibold transition",
                           active
-                            ? "border-[#8ab8ff] bg-white text-[#0f1b33] shadow-sm"
-                            : "border-[#3e557e] bg-white/5 text-white hover:border-[#5f7dae] hover:bg-white/10",
+                            ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33]"
+                            : "border-[#4b628f] bg-white/10 text-[#d8e4fb] hover:bg-white/15",
                         ].join(" ")}
                       >
-                        <div className={`text-sm font-semibold ${active ? "text-[#0f1b33]" : "text-white"}`}>{option}</div>
-                        <div className={`mt-2 text-xs ${active ? "text-[#1f3358]" : "text-[#cfdbf3]"}`}>{note}</div>
+                        {option}
                       </button>
                     );
                   })}
                 </div>
 
-                <div className="mt-3 grid gap-3 md:grid-cols-3">
-                  {PRACTICE_MODES.map((m) => {
-                    const active = practiceMode === m.key;
-                    const lockedByTier = m.key === "exam" && !tier.limits.examMode;
-                    return (
-                      <button
-                        key={m.key}
-                        onClick={() => {
-                          if (lockedByTier) {
-                            router.push("/pricing");
-                            return;
-                          }
-                          setPracticeMode(m.key);
-                        }}
-                        disabled={lockedByTier}
-                        className={[
-                          "rounded-xl border p-4 text-left transition disabled:cursor-not-allowed",
-                          active
-                            ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33] shadow-sm"
-                            : lockedByTier
-                            ? "border-[#4a5a7a] bg-white/5 text-[#8fa2c4] opacity-70"
-                            : "border-[#3e557e] bg-white/5 text-white hover:border-[#5f7dae] hover:bg-white/10",
-                        ].join(" ")}
-                      >
-                        <div className={`text-sm font-semibold ${active ? "text-[#0f1b33]" : lockedByTier ? "text-[#9fb2d3]" : "text-white"}`}>
-                          {m.label}
-                          {lockedByTier && <span className="ml-1 text-[10px] uppercase tracking-[0.12em]">Pro+</span>}
-                        </div>
-                        <div className={`mt-2 text-xs ${active ? "text-[#23375d]" : lockedByTier ? "text-[#8fa2c4]" : "text-[#cfdbf3]"}`}>{m.note}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {planNotice && (
-                  <div className="mt-3 rounded-xl border border-[#5872a7] bg-white/10 px-3 py-3 text-xs text-[#d6e3fb]">
-                    {planNotice}
+                {!subskill ? (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <button
+                      onClick={() => switchPoolMode(false)}
+                      className={[
+                        "rounded-lg border px-3 py-2 text-left text-xs font-semibold transition",
+                        !includeSeen
+                          ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33]"
+                          : "border-[#4b628f] bg-white/10 text-[#d8e4fb] hover:bg-white/15",
+                      ].join(" ")}
+                    >
+                      Fresh pool
+                    </button>
+                    <button
+                      onClick={() => switchPoolMode(true)}
+                      className={[
+                        "rounded-lg border px-3 py-2 text-left text-xs font-semibold transition",
+                        includeSeen
+                          ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33]"
+                          : "border-[#4b628f] bg-white/10 text-[#d8e4fb] hover:bg-white/15",
+                      ].join(" ")}
+                    >
+                      Revisit pool
+                    </button>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-[#4b628f] bg-white/10 px-3 py-2 text-xs text-[#d8e4fb]">
+                    Subskill lock: {subskill}
                   </div>
                 )}
-
-                {!subskill && (
-                  <div className="mt-3 rounded-xl border border-[#3e557e] bg-white/5 p-3">
-                    <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">
-                      Question pool discipline
-                    </div>
-                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                      <button
-                        onClick={() => switchPoolMode(false)}
-                        className={[
-                          "rounded-lg border px-3 py-2 text-left text-xs font-semibold transition",
-                          !includeSeen
-                            ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33]"
-                            : "border-[#4b628f] bg-white/10 text-[#d8e4fb] hover:bg-white/15",
-                        ].join(" ")}
-                      >
-                        Fresh only
-                      </button>
-                      <button
-                        onClick={() => switchPoolMode(true)}
-                        className={[
-                          "rounded-lg border px-3 py-2 text-left text-xs font-semibold transition",
-                          includeSeen
-                            ? "border-[#8ab8ff] bg-[#edf5ff] text-[#0f1b33]"
-                            : "border-[#4b628f] bg-white/10 text-[#d8e4fb] hover:bg-white/15",
-                        ].join(" ")}
-                      >
-                        Explicit revisit
-                      </button>
-                    </div>
-                    <div className="mt-2 text-xs text-[#c8d4ed]">
-                      Fresh mode is server-enforced unseen and not-due. Revisit mode is intentional seen-question drilling.
-                    </div>
-                  </div>
-                )}
-
-                {subskill && (
-                  <div className="mt-3 rounded-xl border border-[#3e557e] bg-white/5 px-3 py-3 text-xs text-[#c8d4ed]">
-                    Targeted subskill mode is treated as explicit revisit by design.
-                  </div>
-                )}
-
-                {poolNotice && (
-                  <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
-                    {poolNotice}
-                  </div>
-                )}
-
-                <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                  <div className="rounded-xl border border-[#3e557e] bg-white/5 px-3 py-3 text-sm text-[#cbd8f0]">
-                    Subject: <span className="font-semibold text-white">{subject}</span>
-                  </div>
-                  <div className="rounded-xl border border-[#3e557e] bg-white/5 px-3 py-3 text-sm text-[#cbd8f0]">
-                    Mode: <span className="font-semibold text-white">{modeLabel}</span>
-                  </div>
-                  <div className="rounded-xl border border-[#3e557e] bg-white/5 px-3 py-3 text-sm text-[#cbd8f0]">
-                    Pool: <span className="font-semibold text-white">{poolModeLabel}</span>
-                  </div>
-                </div>
-
-                <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                  <button
-                    onClick={startSession}
-                    className="inline-flex items-center justify-center rounded-xl bg-white px-4 py-3 text-sm font-semibold text-[#0f1b33] transition hover:bg-[#ecf3ff]"
-                  >
-                    Start session
-                  </button>
-                  <Link
-                    href="/today"
-                    className="inline-flex items-center justify-center rounded-xl border border-[#506894] bg-white/5 px-4 py-3 text-sm font-semibold text-[#d7e3fb] transition hover:border-[#6f8ec7] hover:bg-white/10"
-                  >
-                    Back to Today
-                  </Link>
-                </div>
               </div>
 
-              <div className="grid gap-3">
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Score band</div>
-                  <div className="mt-2 text-3xl font-semibold tracking-tight text-white">
-                    {scoreBand.low}–{scoreBand.high}
-                  </div>
-                  <div className="mt-2 text-xs text-[#c8d4ed]">
-                    {scoreBand.confidence} confidence • {scoreBand.signalAnswers} answers backing estimate
-                  </div>
+              {planNotice && (
+                <div className="mt-3 rounded-xl border border-[#5872a7] bg-white/10 px-3 py-3 text-xs text-[#d6e3fb]">
+                  {planNotice}
                 </div>
-
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Execution profile</div>
-                  <div className="mt-2 text-sm text-[#d2dbec]">{modeExecutionIdentity}</div>
-                  <div className="mt-3 text-xs text-[#c8d4ed]">
-                    Estimated block: {estimatedBlockMinutes}m • {questions.length} questions
-                  </div>
-                  {identity && identityStatus && (
-                    <div className="mt-3 text-xs text-[#c8d4ed]">
-                      {identityStatus.division.label} L{identityStatus.level} • {identity.streakDays}d streak
-                    </div>
-                  )}
+              )}
+              {poolNotice && (
+                <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+                  {poolNotice}
                 </div>
+              )}
 
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Pool policy</div>
-                  <div className="mt-2 text-sm text-[#d2dbec]">
-                    {!includeSeen && !subskill
-                      ? "Fresh-only rotation. Seen and due-review questions are blocked from casual replay."
-                      : "Intentional revisit mode. Pulls prior-seen questions first for explicit reinforcement."}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Current plan</div>
-                  <div className="mt-2 text-sm font-semibold text-white">{tier.label}</div>
-                  <div className="mt-1 text-xs text-[#c8d4ed]">{tier.tagline}</div>
-                  {!tier.limits.examMode && (
-                    <Link href="/pricing" className="mt-3 inline-flex text-xs font-semibold text-[#b9d6ff] underline">
-                      Unlock exam shell in Pro
-                    </Link>
-                  )}
-                </div>
-
-                {studentState && (
-                  <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Shared student state</div>
-                    <div className="mt-2 text-sm text-[#d2dbec]">
-                      Debt {studentState.reviewDebt.dueCount} • Recommended mode {studentState.recommendedPracticeMode}
-                    </div>
-                    {studentState.weakestSkill && (
-                      <div className="mt-1 text-xs text-[#c8d4ed]">
-                        Weakest: {studentState.weakestSkill.subskill} ({studentState.weakestSkill.accuracyPct}% • {studentState.weakestSkill.confidence} confidence)
-                      </div>
-                    )}
-                    <div className="mt-3 text-xs text-[#c8d4ed]">{studentState.recommendedAction.reason}</div>
-                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                      <Link
-                        href={studentState.recommendedAction.primaryHref}
-                        className="inline-flex items-center justify-center rounded-lg border border-[#5872a7] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb] transition hover:bg-white/15"
-                      >
-                        {studentState.recommendedAction.primaryLabel}
-                      </Link>
-                      <Link
-                        href={studentState.recommendedAction.secondaryHref}
-                        className="inline-flex items-center justify-center rounded-lg border border-[#5872a7] bg-white/10 px-3 py-2 text-xs font-semibold text-[#d7e3fb] transition hover:bg-white/15"
-                      >
-                        {studentState.recommendedAction.secondaryLabel}
-                      </Link>
-                    </div>
-                  </div>
-                )}
-
-                {subskill && (
-                  <Link
-                    href={`/lesson/${encodeURIComponent(subskill)}`}
-                    className="inline-flex items-center justify-center rounded-xl border border-[#506894] bg-white/5 px-4 py-3 text-sm font-semibold text-[#d7e3fb] transition hover:border-[#6f8ec7] hover:bg-white/10"
-                  >
-                    Open lesson before run
-                  </Link>
-                )}
-              </div>
-            </div>
-
-            {(subject === "Math" || subject === "Combined") && (
-              <div className="border-t border-white/10 bg-black/10 p-4 sm:px-6">
-                <div className="flex flex-wrap items-center justify-between gap-3">
+              {(subject === "Math" || subject === "Combined") && (
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#3f557f] bg-white/5 px-3 py-3">
                   <div>
                     <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">SAT tool layer</div>
-                    <div className="mt-1 text-sm font-semibold text-white">Formula + calculator strategy available in-session</div>
+                    <div className="mt-1 text-xs text-[#c8d4ed]">Formula and calculator strategy available in-session.</div>
                   </div>
                   <button
                     onClick={openToolSurface}
@@ -1849,15 +2157,20 @@ export default function PracticeClient() {
                     Open Bluebook tools
                   </button>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </section>
         </div>
       )}
 
       {!loading && !err && mode === "in_session" && q && (
         <div className="grid gap-5">
-          <div className="sticky top-[4.5rem] z-20 overflow-hidden rounded-2xl border border-[#22345e] bg-[linear-gradient(145deg,#0f172a,#111d35)] p-4 shadow-xl backdrop-blur">
+          <div
+            className={[
+              "sticky top-[4rem] z-20 overflow-hidden rounded-2xl border border-[#22345e] bg-[linear-gradient(145deg,#0f172a,#111d35)] shadow-xl backdrop-blur",
+              compactExamShell ? "p-3 sm:p-3.5" : "p-4",
+            ].join(" ")}
+          >
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm font-semibold text-white">
                 {subject === "Combined" ? `${q.subject} live` : modeLabel} • Question {Math.min(idx + 1, total)} / {total}
@@ -1866,6 +2179,9 @@ export default function PracticeClient() {
                 <Pill text={modePill} tone={modePillTone} />
                 <Pill text={poolModeLabel} tone={includeSeen || subskill ? "accent" : "neutral"} />
                 <Pill text={`Combo ${momentum.combo}`} tone={momentum.currentStreak >= 4 ? "success" : "neutral"} />
+                {practiceMode === "exam" && (
+                  <Pill text={examOptionEliminatorMode ? "Eliminator ON" : "Eliminator OFF"} tone={examOptionEliminatorMode ? "accent" : "neutral"} />
+                )}
                 {hasMathTools && (
                   <button
                     onClick={openToolSurface}
@@ -1883,25 +2199,20 @@ export default function PracticeClient() {
                 style={{ width: `${momentum.progressPct}%` }}
               />
             </div>
-            <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-[#c8d4ed] sm:grid-cols-4">
+            <div className={`mt-2 grid gap-2 text-xs text-[#c8d4ed] ${practiceMode === "exam" ? "grid-cols-3 sm:grid-cols-5" : "grid-cols-2 sm:grid-cols-4"}`}>
               <div>Answered {practiceMode === "exam" ? examAnsweredCount : answeredCount}</div>
               <div>Correct {correctCount}</div>
-              <div>Session XP {momentum.sessionXp}</div>
-              <div className="sm:text-right">Energy {momentum.energy}%</div>
+              <div>Accuracy {accuracyPct}%</div>
+              <div className={practiceMode === "exam" ? "" : "sm:text-right"}>Progress {momentum.progressPct}%</div>
+              {practiceMode === "exam" && <div>Unanswered {examUnansweredCount}</div>}
             </div>
-            <div className="mt-2 text-xs text-[#9db0d2]">{momentumStateLabel}</div>
+            {practiceMode !== "exam" && <div className="mt-2 text-xs text-[#9db0d2]">{momentumStateLabel}</div>}
             {practiceMode === "exam" && (
-              <div className="mt-3 rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-xs text-[#cedaf1]">
-                Bluebook shell behavior: save answers, mark uncertain items, use question map, then submit from checkpoint.
-              </div>
-            )}
-            {practiceMode === "exam" && (
-              <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                <div className="rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-xs text-[#cedaf1]">
-                  Marked: <span className="font-semibold text-white">{examMarkedCount}</span>
-                </div>
-                <div className="rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-xs text-[#cedaf1]">
-                  Unanswered: <span className="font-semibold text-white">{examUnansweredCount}</span>
+              <div className={`mt-3 grid gap-2 ${compactExamShell ? "grid-cols-2" : "sm:grid-cols-3"}`}>
+                <div className={`rounded-lg border border-[#3f557f] bg-white/5 px-3 py-2 text-xs text-[#cedaf1] ${compactExamShell ? "col-span-2 sm:col-span-1" : ""}`}>
+                  Marked <span className="font-semibold text-white">{examMarkedCount}</span>
+                  <span className="mx-2 text-white/25">•</span>
+                  Unanswered <span className="font-semibold text-white">{examUnansweredCount}</span>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <button
@@ -1933,7 +2244,7 @@ export default function PracticeClient() {
                 />
               </div>
             )}
-            {practiceMode === "exam" && examSections.length > 1 && (
+            {practiceMode === "exam" && examSections.length > 1 && !compactExamShell && (
               <div className="mt-3 grid gap-2 sm:grid-cols-2">
                 {examSections.map((section) => (
                   <button
@@ -1993,6 +2304,16 @@ export default function PracticeClient() {
                   className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
                 >
                   Clear answer
+                </button>
+                <button
+                  onClick={() => setExamOptionEliminatorMode((prev) => !prev)}
+                  className={`rounded-lg border px-3 py-2 text-xs font-semibold ${
+                    examOptionEliminatorMode
+                      ? "border-[#1a2f58] bg-[#edf5ff] text-[#0f1b33]"
+                      : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                  }`}
+                >
+                  {examOptionEliminatorMode ? "Eliminator ON" : "Eliminator OFF"}
                 </button>
               </div>
             )}
@@ -2074,11 +2395,11 @@ export default function PracticeClient() {
             </div>
 
             {practiceMode !== "exam" && locked && feedback && (
-              <div className={`mt-5 rounded-2xl border p-5 ${feedback.correct ? "border-[#9de0bb] bg-[#ebfdf2]" : "border-[#f5b8c4] bg-[#fff2f5]"}`}>
-                <div className={`font-semibold ${feedback.correct ? "text-[#0f8a4e]" : "text-[#b02039]"}`}>
-                  {feedback.correct ? "Correct. Keep the run alive." : "Miss. Recover immediately."}
-                </div>
-                <div className="mt-1 text-xs text-gray-700">+{momentum.instantXp} XP • Combo {momentum.combo}</div>
+                <div className={`mt-5 rounded-2xl border p-5 ${feedback.correct ? "border-[#9de0bb] bg-[#ebfdf2]" : "border-[#f5b8c4] bg-[#fff2f5]"}`}>
+                  <div className={`font-semibold ${feedback.correct ? "text-[#0f8a4e]" : "text-[#b02039]"}`}>
+                    {feedback.correct ? "Correct. Keep the run alive." : "Miss. Recover immediately."}
+                  </div>
+                  <div className="mt-1 text-xs text-gray-700">Combo {momentum.combo}</div>
 
                 {!feedback.correct && (
                   <div className="mt-2 text-sm text-gray-700">
@@ -2338,10 +2659,10 @@ export default function PracticeClient() {
       {!loading && !err && mode === "done" && (
         <div className="grid gap-4">
           <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] bg-[linear-gradient(145deg,#0f172a,#111827_46%,#0b1222)] shadow-xl">
-            <div className="grid gap-4 p-5 sm:p-6 lg:grid-cols-[1.05fr_0.95fr]">
+            <div className="p-5 sm:p-6">
               <div>
                 <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
-                  Session complete
+                  Practice result
                 </div>
                 <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
                   {sessionOutcome?.title ?? "Execution complete"}
@@ -2349,214 +2670,122 @@ export default function PracticeClient() {
                 <p className="mt-2 text-sm leading-relaxed text-[#d2dbec]">
                   {sessionOutcome?.note ?? "Choose the next route while the signal is still fresh."}
                 </p>
-                <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
-                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
-                    Score: <span className="font-semibold text-white">{correctCount}/{total}</span>
-                  </div>
-                  <div className="rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
-                    Accuracy: <span className="font-semibold text-white">{analysis.accuracyPct}%</span>
-                  </div>
+                <div className="mt-3 rounded-xl border border-[#3f557f] bg-white/5 p-3 text-sm text-[#cedaf1]">
+                  {sessionPayoff
+                    ? `Payoff secured: +${sessionPayoff.totalAwarded} XP${
+                        identityStatus ? ` • ${identityStatus.division.label} L${identityStatus.level}` : ""
+                      }${identity ? ` • ${identity.streakDays} day streak` : ""}.`
+                    : `Payoff secured: ${modeIdentity.finishPayoff}`}
                 </div>
               </div>
 
-              <div className="grid gap-3">
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Predicted score band</div>
-                  <div className="mt-2 text-3xl font-semibold tracking-tight text-white">{scoreBand.low}–{scoreBand.high}</div>
-                  <div className="mt-1 text-xs text-[#c8d4ed]">{scoreBand.confidence} confidence estimate</div>
-                </div>
-                <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Next execution</div>
-                  <div className="mt-2 text-sm text-[#d2dbec]">
-                    {repairTopic ? `Primary repair target: ${repairTopic}` : "No single failed topic dominated this set."}
-                  </div>
-                </div>
-                {executionDelta && (
-                  <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
-                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#a6c5ff]">Change vs previous block</div>
-                    <div className="mt-2 text-sm text-[#d2dbec]">
-                      Accuracy {executionDelta.accuracyDelta >= 0 ? "+" : ""}{executionDelta.accuracyDelta}%
-                      <span className="mx-1 text-[#7389b4]">•</span>
-                      XP {executionDelta.xpDelta >= 0 ? "+" : ""}{executionDelta.xpDelta}
-                    </div>
-                  </div>
-                )}
+              <div className="mt-5">
+                <PracticePayoffCompanion
+                  accuracy={analysis.accuracyPct}
+                  delta={executionDelta?.accuracyDelta ?? null}
+                  recovered={analysis.recoveredTopics.length}
+                  weakRemaining={analysis.failedTopics.length}
+                  reviewDue={postSessionDueCount ?? 0}
+                />
               </div>
             </div>
           </section>
 
-          <Card
-            title="Practice session complete"
-            subtitle="Execution complete. Choose the next route while the signal is fresh."
-            right={sessionOutcome ? <Pill text={sessionOutcome.title} tone={sessionOutcome.tone} /> : null}
-            accent
-            prominence="prominent"
-          >
+          <Card title="Next route" subtitle="Run the highest-value follow-up while this signal is still fresh." accent prominence="prominent">
             <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-              <div className="rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-5">
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <StatBox
-                    label="Score"
-                    value={`${correctCount}/${total}`}
-                    hint="Correct / total"
-                    accent={accuracyPct >= 50}
-                    size={accuracyPct >= 50 ? "large" : "default"}
-                  />
-                  <StatBox
-                    label="Accuracy"
-                    value={`${analysis.accuracyPct}%`}
-                    hint="This session"
-                    accent={accuracyPct >= 75}
-                    size={accuracyPct >= 75 ? "large" : "default"}
-                  />
+              <div className="rounded-2xl border border-[#cfe2ff] bg-[#f7fbff] p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">Weak topic surfaced</div>
+                {repairTopic ? (
+                  <>
+                    <div className="mt-2 text-2xl font-semibold tracking-tight text-[#0e1b34]">{repairTopic}</div>
+                    <div className="mt-1 text-sm text-[#4d607f]">
+                      {analysis.primaryRepairTarget
+                        ? `${Math.round(analysis.primaryRepairTarget.accuracy * 100)}% on ${analysis.primaryRepairTarget.total} question${
+                            analysis.primaryRepairTarget.total === 1 ? "" : "s"
+                          } (${analysis.primaryRepairTarget.incorrect} miss${
+                            analysis.primaryRepairTarget.incorrect === 1 ? "" : "es"
+                          }).`
+                        : "Weakness surfaced in this block."}
+                    </div>
+                    {postSessionMasteryProbe && (
+                      <div className="mt-3 rounded-xl border border-[#d7e5fb] bg-white px-3 py-3 text-sm text-[#4d607f]">
+                        Current mastery state:{" "}
+                        <span className="font-semibold text-[#0f1b33]">
+                          {postSessionMasteryProbe.mastery}
+                        </span>
+                        <span className="mx-2 text-[#9ab2da]">•</span>
+                        Movement:{" "}
+                        <span className="font-semibold text-[#0f1b33]">
+                          {postSessionMasteryProbe.movement}
+                        </span>
+                        <span className="mx-2 text-[#9ab2da]">•</span>
+                        {postSessionMasteryProbe.accuracyPct}% across {postSessionMasteryProbe.attempts} attempts
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="mt-2 text-sm text-[#4d607f]">
+                    No single weak topic dominated this block. Push one more clean set to reveal the next bottleneck.
+                  </div>
+                )}
+                <div className="mt-4 grid gap-2">
+                  {analysis.recoveredTopics.slice(0, 1).map((topic) => (
+                    <div
+                      key={`recovered-${topic.topic}`}
+                      className="rounded-lg border border-[#9de0bb] bg-[#ebfdf2] px-3 py-2 text-sm text-[#0f8a4e]"
+                    >
+                      Recovered this block: <span className="font-semibold">{topic.topic}</span> ({Math.round(topic.accuracy * 100)}%)
+                    </div>
+                  ))}
+                  {analysis.failedTopics.slice(0, 1).map((topic) => (
+                    <div
+                      key={`failed-${topic.topic}`}
+                      className="rounded-lg border border-[#f5b8c4] bg-[#fff2f5] px-3 py-2 text-sm text-[#b02039]"
+                    >
+                      Still weak: <span className="font-semibold">{topic.topic}</span> ({Math.round(topic.accuracy * 100)}%)
+                    </div>
+                  ))}
                 </div>
-                <div className="mt-4 text-sm text-gray-700">
-                  Predicted band <span className="font-semibold text-black">{scoreBand.low}–{scoreBand.high}</span>
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-5">
+                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Do this now</div>
+                <div className="mt-2 text-sm text-gray-700">{primaryFinishAction.note}</div>
+                <div className="mt-4">
+                  {primaryFinishAction.href ? (
+                    <PrimaryButton href={primaryFinishAction.href}>{primaryFinishAction.label}</PrimaryButton>
+                  ) : (
+                    <PrimaryButton onClick={primaryFinishAction.onClick}>{primaryFinishAction.label}</PrimaryButton>
+                  )}
+                </div>
+
+                {cappedSecondaryActions.length > 0 && (
+                  <div className="mt-4 grid gap-3">
+                    {cappedSecondaryActions.map((action) => (
+                      <div key={action.id} className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
+                        <div className="text-xs text-gray-600">{action.note}</div>
+                        <div className="mt-2">
+                          <SecondaryButton href={action.href}>{action.label}</SecondaryButton>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-700">
+                  Review due now: <span className="font-semibold text-black">{postSessionDueCount ?? "—"}</span>
+                  <span className="mx-2 text-gray-300">•</span>
+                  Practice signal: <span className="font-semibold text-black">{scoreBand.low}–{scoreBand.high}</span>
                   <span className="mx-2 text-gray-300">•</span>
                   {scoreBand.confidence} confidence
                 </div>
               </div>
-
-              <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Next execution</div>
-                <div className="mt-2 text-sm text-gray-700">
-                  {repairTopic
-                    ? `Primary repair target: ${repairTopic}`
-                    : "No single failed topic dominated this set."}
-                </div>
-                <div className="mt-4 grid gap-3">
-                  {postSessionRoute.primaryHref ? (
-                    <PrimaryButton href={postSessionRoute.primaryHref}>{postSessionRoute.primaryLabel}</PrimaryButton>
-                  ) : (
-                    <PrimaryButton onClick={ensureAuthAndLoad}>{postSessionRoute.primaryLabel}</PrimaryButton>
-                  )}
-                  <SecondaryButton href={postSessionRoute.secondaryHref}>
-                    {postSessionRoute.secondaryLabel}
-                  </SecondaryButton>
-                </div>
-                {repairTopic && (
-                  <div className="mt-4 rounded-2xl border border-[#d7e5fb] bg-[#f6faff] p-4">
-                    <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
-                      Lesson bridge
-                    </div>
-                    <div className="mt-2 text-sm text-gray-700">
-                      Repair the pattern, then rerun the exact subtopic.
-                    </div>
-                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                      <SecondaryButton href={repairLessonHref}>Open lesson</SecondaryButton>
-                      <SecondaryButton href={repairPracticeHref}>Focused retry</SecondaryButton>
-                    </div>
-                  </div>
-                )}
-              </div>
             </div>
 
-            <div className="mt-4 grid gap-4 lg:grid-cols-2">
-              <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                  What changed in this block
-                </div>
-                <div className="mt-3 grid gap-2">
-                  {analysis.recoveredTopics.slice(0, 2).map((topic) => (
-                    <div key={`recovered-${topic.topic}`} className="rounded-lg border border-[#9de0bb] bg-[#ebfdf2] px-3 py-2 text-sm text-[#0f8a4e]">
-                      Recovered: <span className="font-semibold">{topic.topic}</span> ({Math.round(topic.accuracy * 100)}%)
-                    </div>
-                  ))}
-                  {analysis.failedTopics.slice(0, 2).map((topic) => (
-                    <div key={`failed-${topic.topic}`} className="rounded-lg border border-[#f5b8c4] bg-[#fff2f5] px-3 py-2 text-sm text-[#b02039]">
-                      Still weak: <span className="font-semibold">{topic.topic}</span> ({Math.round(topic.accuracy * 100)}%)
-                    </div>
-                  ))}
-                  {analysis.recoveredTopics.length === 0 && analysis.failedTopics.length === 0 && (
-                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
-                      Not enough topic movement yet. Run another focused block.
-                    </div>
-                  )}
-                </div>
+            {postSessionSignalsNotice && (
+              <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                {postSessionSignalsNotice}
               </div>
-
-              <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                  Post-session system state
-                </div>
-                <div className="mt-3 grid gap-2">
-                  {postSessionDueCount !== null && (
-                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
-                      Due for review now: <span className="font-semibold text-black">{postSessionDueCount}</span>
-                    </div>
-                  )}
-                  {postSessionMasteryProbe && (
-                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
-                      <div className="text-sm font-semibold text-black">{postSessionMasteryProbe.topic}</div>
-                      <div className="mt-1 text-xs text-gray-600">
-                        {postSessionMasteryProbe.subject} • {postSessionMasteryProbe.accuracyPct}% • {postSessionMasteryProbe.attempts} attempts
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <Pill text={postSessionMasteryProbe.mastery} tone={masteryTone(postSessionMasteryProbe.mastery)} />
-                        <Pill text={postSessionMasteryProbe.movement} tone={movementTone(postSessionMasteryProbe.movement)} />
-                      </div>
-                    </div>
-                  )}
-                  {postSessionSignalsNotice && (
-                    <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                      {postSessionSignalsNotice}
-                    </div>
-                  )}
-                  {studentState && (
-                    <div className="rounded-lg border border-[#d7e5fb] bg-[#f6faff] px-3 py-3">
-                      <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
-                        Unified state command
-                      </div>
-                      <div className="mt-2 text-sm font-semibold text-[#0f1b33]">
-                        {studentState.recommendedAction.title}
-                      </div>
-                      <div className="mt-1 text-xs text-gray-700">{studentState.recommendedAction.reason}</div>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                        <SecondaryButton href={studentState.recommendedAction.primaryHref}>
-                          {studentState.recommendedAction.primaryLabel}
-                        </SecondaryButton>
-                        <SecondaryButton href={studentState.recommendedAction.secondaryHref}>
-                          {studentState.recommendedAction.secondaryLabel}
-                        </SecondaryButton>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {sessionOutcome && (
-              <div
-                className={`mt-6 rounded-2xl border-2 p-5 ${
-                  sessionOutcome.tone === "danger"
-                    ? "border-red-300 bg-red-50"
-                    : sessionOutcome.tone === "accent"
-                    ? "border-[#c7dbff] bg-[#f6faff]"
-                    : "border-green-300 bg-green-50"
-                }`}
-              >
-                <div
-                  className={`text-sm font-semibold ${
-                    sessionOutcome.tone === "danger"
-                      ? "text-red-700"
-                      : sessionOutcome.tone === "accent"
-                      ? "text-[#004aad]"
-                      : "text-green-700"
-                  }`}
-                >
-                  {sessionOutcome.title}
-                </div>
-                <div className="mt-2 text-sm leading-relaxed text-gray-700">{sessionOutcome.note}</div>
-              </div>
-            )}
-
-            {sessionPayoff && identityStatus && identity && (
-              <SessionPayoffCard
-                payoff={sessionPayoff}
-                status={identityStatus}
-                streakDays={identity.streakDays}
-                mode="practice"
-              />
             )}
 
             {engagementNotice && (
@@ -2564,42 +2793,6 @@ export default function PracticeClient() {
                 {engagementNotice}
               </div>
             )}
-
-            {identityStatus && identity && (
-              <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
-                {identityStatus.division.label} • Level {identityStatus.level} • Streak {identity.streakDays}d
-                {identityStatus.nextDivision && (
-                  <span className="ml-2 text-gray-500">({pointsToNextDivision(identity)} XP to {identityStatus.nextDivision.label})</span>
-                )}
-              </div>
-            )}
-
-            {shareText && (
-              <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                  Shareable result
-                </div>
-                <div className="mt-2 text-sm leading-relaxed text-gray-700">{shareText}</div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:max-w-xl">
-                  <PrimaryButton onClick={copyShareResult}>
-                    {copiedShare ? "Copied" : "Copy result"}
-                  </PrimaryButton>
-                  <SecondaryButton href="/leagues">Post in community</SecondaryButton>
-                </div>
-              </div>
-            )}
-
-            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-              {historySessionId ? (
-                <PrimaryButton href={`/history?session=${encodeURIComponent(historySessionId)}`}>Reopen this result</PrimaryButton>
-              ) : (
-                <SecondaryButton href="/history">Open history</SecondaryButton>
-              )}
-              <SecondaryButton href="/skills">Open skills</SecondaryButton>
-              <SecondaryButton href="/today">Back to Today</SecondaryButton>
-              <SecondaryButton href="/review">Open review queue</SecondaryButton>
-              <SecondaryButton href="/coach">Open coach</SecondaryButton>
-            </div>
           </Card>
         </div>
       )}

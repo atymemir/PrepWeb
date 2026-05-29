@@ -4,71 +4,32 @@ export const dynamic = 'force-dynamic';
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  getStudySessionQuestions,
   getStudySessions,
   type StudySessionMode,
+  type StudySessionQuestionRecord,
   type StudySessionRecord,
 } from "../lib/sessionHistory";
 import { errorMessage } from "../lib/errors";
 import { focusedLessonHref, focusedPracticeHref, subjectForTopic } from "../lib/mastery";
 import { getMyPlanTier } from "../lib/planTier";
 import { tierDefinition, type PlanTier } from "../lib/productTiers";
+import {
+  fmtSessionDate,
+  hasComparableSessionShape,
+  replaySessionHref,
+  sessionModeLabel,
+} from "../lib/studentState";
 import { useStudentState } from "../lib/useStudentState";
+import { HistoryTrajectoryCompanion } from "../components/PageVisualCompanions";
 import { Card, PageHeader, Pill, PrimaryButton, SecondaryButton } from "../ui/ui";
 
 type ModeFilter = "all" | StudySessionMode;
 
 function sessionLabel(session: StudySessionRecord): string {
-  if (session.mode === "exam") return "Exam";
-  if (session.mode === "review") return "Review";
-  return session.variant ? `Practice • ${session.variant}` : "Practice";
-}
-
-function fmtDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
-}
-
-function subjectForPractice(raw: string | null): "Reading" | "Math" | "Combined" {
-  if (raw === "Math") return "Math";
-  if (raw === "Combined") return "Combined";
-  return "Reading";
-}
-
-function replayHref(session: StudySessionRecord): string {
-  if (session.mode === "review") return "/review";
-
-  const params = new URLSearchParams();
-  params.set("subject", subjectForPractice(session.subject));
-
-  if (session.mode === "exam") {
-    params.set("mode", "exam");
-    return `/practice?${params.toString()}`;
-  }
-
-  if (session.variant === "timed" || session.variant === "exam" || session.variant === "trainer") {
-    params.set("mode", session.variant);
-  }
-
-  if (session.subskill) {
-    params.set("subskill", session.subskill);
-    params.set("revisit", "1");
-  }
-
-  return `/practice?${params.toString()}`;
-}
-
-function hasComparableShape(a: StudySessionRecord, b: StudySessionRecord): boolean {
-  if (a.mode !== b.mode) return false;
-  if (a.mode === "review") return true;
-  const aSubject = a.subject ?? "Mixed";
-  const bSubject = b.subject ?? "Mixed";
-  if (aSubject !== bSubject) return false;
-  if ((a.variant ?? "") !== (b.variant ?? "")) return false;
-  if ((a.subskill ?? "") !== (b.subskill ?? "")) return false;
-  return true;
+  const base = sessionModeLabel(session.mode);
+  if (session.mode === "practice" && session.variant) return `${base} • ${session.variant}`;
+  return base;
 }
 
 export default function HistoryPage() {
@@ -81,6 +42,10 @@ export default function HistoryPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [modeFilter, setModeFilter] = useState<ModeFilter>("all");
   const [planTier, setPlanTier] = useState<PlanTier>("free");
+  const [questionRows, setQuestionRows] = useState<StudySessionQuestionRecord[]>([]);
+  const [questionRowsLoading, setQuestionRowsLoading] = useState(false);
+  const [questionRowsError, setQuestionRowsError] = useState<string | null>(null);
+  const [selectedQuestionId, setSelectedQuestionId] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -151,6 +116,44 @@ export default function HistoryPage() {
   );
 
   useEffect(() => {
+    let cancelled = false;
+
+    const run = async () => {
+      if (!selected?.id) {
+        setQuestionRows([]);
+        setSelectedQuestionId(null);
+        setQuestionRowsError(null);
+        setQuestionRowsLoading(false);
+        return;
+      }
+
+      setQuestionRowsLoading(true);
+      setQuestionRowsError(null);
+      try {
+        const rows = await getStudySessionQuestions(selected.id);
+        if (cancelled) return;
+        setQuestionRows(rows);
+        setSelectedQuestionId(rows[0]?.id ?? null);
+      } catch (e: unknown) {
+        if (cancelled) return;
+        setQuestionRows([]);
+        setSelectedQuestionId(null);
+        setQuestionRowsError(errorMessage(e, "Question-level history is unavailable for this session."));
+      } finally {
+        if (!cancelled) {
+          setQuestionRowsLoading(false);
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.id]);
+
+  useEffect(() => {
     if (!selected?.id || typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
     params.set("session", selected.id);
@@ -170,7 +173,7 @@ export default function HistoryPage() {
     const idx = sessions.findIndex((session) => session.id === selected.id);
     if (idx < 0) return null;
     for (let i = idx + 1; i < sessions.length; i += 1) {
-      if (hasComparableShape(selected, sessions[i])) return sessions[i];
+      if (hasComparableSessionShape(selected, sessions[i])) return sessions[i];
     }
     return null;
   }, [selected, sessions]);
@@ -221,15 +224,28 @@ export default function HistoryPage() {
     if (weakestTopic) {
       return {
         label: `Retry ${weakestTopic.topic}`,
-        href: focusedPracticeHref(subjectForTopic(weakestTopic.subject), weakestTopic.topic, true),
+        href: focusedPracticeHref(subjectForTopic(weakestTopic.subject), weakestTopic.topic),
       };
     }
 
     return {
       label: "Replay same shape",
-      href: replayHref(selected),
+      href: replaySessionHref(selected),
     };
   }, [selected, weakestTopic]);
+
+  const selectedQuestion = useMemo(
+    () => questionRows.find((question) => question.id === selectedQuestionId) ?? questionRows[0] ?? null,
+    [questionRows, selectedQuestionId]
+  );
+
+  const selectedQuestionRetryHref = useMemo(() => {
+    if (!selectedQuestion) return null;
+    const topic = selectedQuestion.topic?.trim() || null;
+    if (!topic) return null;
+    const subject = subjectForTopic(selectedQuestion.subject);
+    return `${focusedPracticeHref(subject, topic)}&mode=trainer`;
+  }, [selectedQuestion]);
 
   const modeCounts = useMemo(() => {
     return {
@@ -283,101 +299,119 @@ export default function HistoryPage() {
 
       {!loading && !err && sessions.length > 0 && selected && (
         <div className="grid gap-4">
-          {studentState && (
-            <section className="rounded-2xl border border-gray-200 bg-white/92 p-4 shadow-sm">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
-                  Unified command
-                </div>
-                <Pill text={`Debt ${studentState.reviewDebt.dueCount}`} tone={studentState.reviewDebt.dueCount > 0 ? "danger" : "success"} />
-              </div>
-              <div className="mt-2 text-sm font-semibold text-black">{studentState.recommendedAction.title}</div>
-              <div className="mt-1 text-xs text-gray-600">{studentState.historyProof.lastMovementText}</div>
-              <div className="mt-3 grid gap-2 sm:max-w-xl sm:grid-cols-2">
-                <SecondaryButton href={studentState.recommendedAction.primaryHref}>
-                  {studentState.recommendedAction.primaryLabel}
-                </SecondaryButton>
-                <SecondaryButton href={studentState.recommendedAction.secondaryHref}>
-                  {studentState.recommendedAction.secondaryLabel}
-                </SecondaryButton>
-              </div>
-            </section>
-          )}
-
           <section className="ink-surface overflow-hidden rounded-[30px] border border-[#213258] shadow-xl">
             <div className="p-5 sm:p-6">
-              <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
-                Selected session
-              </div>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <h2 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">
-                  {sessionLabel(selected)}
-                </h2>
-                <Pill text={`${selected.accuracyPct}%`} tone={selected.accuracyPct >= 75 ? "success" : "accent"} />
-              </div>
-              <div className="mt-2 text-sm text-[#d2dbec]">
-                {selected.correctCount}/{selected.answeredCount} • {Math.max(1, Math.round(selected.durationSeconds / 60))}m • {fmtDate(selected.createdAt)}
-              </div>
-              {weakestTopic && (
-                <div className="mt-4 rounded-xl border border-white/20 bg-white/10 px-3 py-3 text-sm text-[#d9e5fb]">
-                  Weakest in this session: <span className="font-semibold text-white">{weakestTopic.topic}</span>
-                  {" "}({weakestTopic.accuracyPct}%).
-                </div>
-              )}
-              <div className="mt-5 border-t border-white/20 pt-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="text-sm font-semibold text-white">Choose session</div>
-                  <div className="flex flex-wrap gap-2">
-                    {([
-                      { key: "all", label: "All", count: modeCounts.all },
-                      { key: "practice", label: "Practice", count: modeCounts.practice },
-                      { key: "review", label: "Review", count: modeCounts.review },
-                      { key: "exam", label: "Exam", count: modeCounts.exam },
-                    ] as const).map((item) => {
-                      const active = modeFilter === item.key;
-                      return (
-                        <button
-                          key={item.key}
-                          onClick={() => setModeFilter(item.key)}
-                          className={[
-                            "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
-                            active
-                              ? "border-white bg-white text-[#0e1b34]"
-                              : "border-white/40 bg-white/10 text-[#d8e5ff] hover:border-white/70",
-                          ].join(" ")}
-                        >
-                          {item.label} ({item.count})
-                        </button>
-                      );
-                    })}
+              <HistoryTrajectoryCompanion
+                delta={comparison?.accuracyDelta ?? null}
+                gainLabel={comparison?.biggestGain ? `${comparison.biggestGain.topic} +${comparison.biggestGain.delta}%` : null}
+                dropLabel={comparison?.biggestDrop ? `${comparison.biggestDrop.topic} ${comparison.biggestDrop.delta}%` : null}
+                reviewDue={studentState?.reviewDebt.dueCount ?? 0}
+              />
+
+              <div className="mt-5 grid gap-5 lg:grid-cols-[1.08fr_0.92fr]">
+                <div>
+                  <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
+                    Selected session
                   </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <h2 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">
+                      {sessionLabel(selected)}
+                    </h2>
+                    <Pill text={`${selected.accuracyPct}%`} tone={selected.accuracyPct >= 75 ? "success" : "accent"} />
+                  </div>
+                  <div className="mt-2 text-sm text-[#d2dbec]">
+                    {selected.correctCount}/{selected.answeredCount} • {Math.max(1, Math.round(selected.durationSeconds / 60))}m • {fmtSessionDate(selected.createdAt)}
+                  </div>
+                  {weakestTopic && (
+                    <div className="mt-4 rounded-xl border border-white/20 bg-white/10 px-3 py-3 text-sm text-[#d9e5fb]">
+                      Weakest in this session: <span className="font-semibold text-white">{weakestTopic.topic}</span>
+                      {" "}({weakestTopic.accuracyPct}%).
+                    </div>
+                  )}
+                  {comparison && (
+                    <div className="mt-3 text-sm text-[#d9e5fb]">
+                      Change vs comparable:{" "}
+                      <span className="font-semibold text-white">{comparison.accuracyDelta >= 0 ? "+" : ""}{comparison.accuracyDelta}%</span>
+                      <span className="mx-2 text-[#8fa6cb]">•</span>
+                      Gain {comparison.biggestGain ? `${comparison.biggestGain.topic} (+${comparison.biggestGain.delta}%)` : "none"}
+                      <span className="mx-2 text-[#8fa6cb]">•</span>
+                      Drop {comparison.biggestDrop ? `${comparison.biggestDrop.topic} (${comparison.biggestDrop.delta}%)` : "none"}
+                    </div>
+                  )}
                 </div>
 
-                {sessions.length >= tier.limits.historySessionLimit && (
-                  <div className="mt-3 rounded-xl border border-white/20 bg-white/10 p-3 text-xs text-[#d8e5ff]">
-                    History cap reached: {tier.limits.historySessionLimit} sessions on {tier.label}.
-                  </div>
-                )}
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+                  {studentState ? (
+                    <>
+                      <PrimaryButton href={studentState.recommendedAction.primaryHref}>
+                        {studentState.recommendedAction.primaryLabel}
+                      </PrimaryButton>
+                      <SecondaryButton href={studentState.recommendedAction.secondaryHref}>
+                        {studentState.recommendedAction.secondaryLabel}
+                      </SecondaryButton>
+                    </>
+                  ) : replayPrimary ? (
+                    <PrimaryButton href={replayPrimary.href}>{replayPrimary.label}</PrimaryButton>
+                  ) : (
+                    <PrimaryButton href={replaySessionHref(selected)}>Replay same shape</PrimaryButton>
+                  )}
+                </div>
+              </div>
+            </div>
 
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {filteredSessions.slice(0, 12).map((session) => {
-                    const active = selected.id === session.id;
+            <div className="border-t border-white/20 px-5 py-4 sm:px-6">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-sm font-semibold text-white">Choose session</div>
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    { key: "all", label: "All", count: modeCounts.all },
+                    { key: "practice", label: "Practice", count: modeCounts.practice },
+                    { key: "review", label: "Review", count: modeCounts.review },
+                    { key: "exam", label: "Exam", count: modeCounts.exam },
+                  ] as const).map((item) => {
+                    const active = modeFilter === item.key;
                     return (
                       <button
-                        key={session.id}
-                        onClick={() => setSelectedId(session.id)}
+                        key={item.key}
+                        onClick={() => setModeFilter(item.key)}
                         className={[
-                          "rounded-full border px-3 py-1.5 text-left text-xs font-semibold transition",
+                          "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
                           active
-                            ? "border-white/70 bg-white text-[#0f1b33]"
-                            : "border-white/30 bg-white/10 text-[#d8e5ff] hover:border-white/45 hover:bg-white/15",
+                            ? "border-white bg-white text-[#0e1b34]"
+                            : "border-white/40 bg-white/10 text-[#d8e5ff] hover:border-white/70",
                         ].join(" ")}
                       >
-                        {sessionLabel(session)} • {session.accuracyPct}% • {Math.max(1, Math.round(session.durationSeconds / 60))}m
+                        {item.label} ({item.count})
                       </button>
                     );
                   })}
                 </div>
+              </div>
+
+              {sessions.length >= tier.limits.historySessionLimit && (
+                <div className="mt-3 rounded-xl border border-white/20 bg-white/10 p-3 text-xs text-[#d8e5ff]">
+                  History cap reached: {tier.limits.historySessionLimit} sessions on {tier.label}.
+                </div>
+              )}
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                {filteredSessions.slice(0, 12).map((session) => {
+                  const active = selected.id === session.id;
+                  return (
+                    <button
+                      key={session.id}
+                      onClick={() => setSelectedId(session.id)}
+                      className={[
+                        "rounded-full border px-3 py-1.5 text-left text-xs font-semibold transition",
+                        active
+                          ? "border-white/70 bg-white text-[#0f1b33]"
+                          : "border-white/30 bg-white/10 text-[#d8e5ff] hover:border-white/45 hover:bg-white/15",
+                      ].join(" ")}
+                    >
+                      {sessionLabel(session)} • {session.accuracyPct}% • {Math.max(1, Math.round(session.durationSeconds / 60))}m
+                    </button>
+                  );
+                })}
               </div>
             </div>
           </section>
@@ -391,7 +425,7 @@ export default function HistoryPage() {
             </div>
             <div className="mt-4 grid gap-3 sm:max-w-3xl sm:grid-cols-3">
               {replayPrimary && <PrimaryButton href={replayPrimary.href}>{replayPrimary.label}</PrimaryButton>}
-              <SecondaryButton href={replayHref(selected)}>Replay same shape</SecondaryButton>
+              <SecondaryButton href={replaySessionHref(selected)}>Replay same shape</SecondaryButton>
               <SecondaryButton href="/review">Open review queue</SecondaryButton>
             </div>
 
@@ -400,7 +434,7 @@ export default function HistoryPage() {
                 Weakest retry target: <span className="font-semibold text-black">{weakestTopic.topic}</span> ({weakestTopic.accuracyPct}%).
                 <div className="mt-2 grid gap-2 sm:max-w-md sm:grid-cols-2">
                   <SecondaryButton href={focusedLessonHref(weakestTopic.topic)}>Open lesson</SecondaryButton>
-                  <SecondaryButton href={focusedPracticeHref(subjectForTopic(weakestTopic.subject), weakestTopic.topic, true)}>
+                  <SecondaryButton href={focusedPracticeHref(subjectForTopic(weakestTopic.subject), weakestTopic.topic)}>
                     Retry topic
                   </SecondaryButton>
                 </div>
@@ -429,7 +463,7 @@ export default function HistoryPage() {
 
                 <div className="rounded-2xl border border-gray-200 bg-white p-4">
                   <div className="text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-                    Topic movement vs {fmtDate(previousComparable.createdAt)}
+                    Topic movement vs {fmtSessionDate(previousComparable.createdAt)}
                   </div>
                   <div className="mt-3 grid gap-2 text-sm">
                     <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-gray-700">
@@ -448,6 +482,125 @@ export default function HistoryPage() {
                           : "No gain detected"}
                       </span>
                     </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="rounded-3xl border border-gray-200 bg-white/92 p-5 shadow-sm">
+            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[#004aad]">
+              Question review
+            </div>
+            <div className="mt-2 text-sm text-gray-700">
+              Inspect exact answers from this session and route immediately.
+            </div>
+
+            {questionRowsLoading && (
+              <div className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                Loading question attempts...
+              </div>
+            )}
+
+            {!questionRowsLoading && questionRowsError && (
+              <div className="mt-3 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+                {questionRowsError}
+              </div>
+            )}
+
+            {!questionRowsLoading && !questionRowsError && questionRows.length === 0 && (
+              <div className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                No question snapshots for this session yet. New sessions now save question-level history automatically.
+              </div>
+            )}
+
+            {!questionRowsLoading && !questionRowsError && questionRows.length > 0 && selectedQuestion && (
+              <div className="mt-4 grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-3">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
+                    Session questions
+                  </div>
+                  <div className="grid gap-2">
+                    {questionRows.map((row) => {
+                      const active = selectedQuestion.id === row.id;
+                      return (
+                        <button
+                          key={row.id}
+                          onClick={() => setSelectedQuestionId(row.id)}
+                          className={[
+                            "rounded-xl border px-3 py-2 text-left text-xs transition",
+                            active
+                              ? "border-[#0f1b33] bg-[#edf5ff] text-[#0f1b33]"
+                              : "border-gray-200 bg-white text-gray-700 hover:border-gray-300",
+                          ].join(" ")}
+                        >
+                          <div className="font-semibold">
+                            Q{row.position} • {row.topic || "Unknown topic"}
+                          </div>
+                          <div className="mt-1">
+                            Selected {row.selectedOption || "—"} • Correct {row.correctOption || "—"} •{" "}
+                            {row.isCorrect ? "Correct" : "Miss"}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-gray-200 bg-white p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="text-sm font-semibold text-black">
+                      Q{selectedQuestion.position} • {selectedQuestion.topic || "Unknown topic"}
+                    </div>
+                    <Pill text={selectedQuestion.isCorrect ? "Correct" : "Miss"} tone={selectedQuestion.isCorrect ? "success" : "danger"} />
+                  </div>
+
+                  <div className="mt-3 text-sm leading-relaxed text-gray-900 whitespace-pre-line">
+                    {selectedQuestion.questionText}
+                  </div>
+
+                  <div className="mt-4 grid gap-2">
+                    {([
+                      { key: "A", value: selectedQuestion.optionA },
+                      { key: "B", value: selectedQuestion.optionB },
+                      { key: "C", value: selectedQuestion.optionC },
+                      { key: "D", value: selectedQuestion.optionD },
+                    ] as const).map((option) => {
+                      const chosen = option.key === selectedQuestion.selectedOption;
+                      const correct = option.key === selectedQuestion.correctOption;
+                      return (
+                        <div
+                          key={option.key}
+                          className={[
+                            "rounded-lg border px-3 py-2 text-sm",
+                            correct
+                              ? "border-[#9de0bb] bg-[#ebfdf2] text-[#0f8a4e]"
+                              : chosen
+                              ? "border-[#f5b8c4] bg-[#fff2f5] text-[#b02039]"
+                              : "border-gray-200 bg-gray-50 text-gray-700",
+                          ].join(" ")}
+                        >
+                          <span className="mr-2 font-semibold">{option.key}.</span>
+                          {option.value}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-700">
+                    {selectedQuestion.explanation
+                      ? selectedQuestion.explanation
+                      : "No explanation saved for this question yet."}
+                  </div>
+
+                  <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                    {selectedQuestionRetryHref && (
+                      <PrimaryButton href={selectedQuestionRetryHref}>Retry this topic</PrimaryButton>
+                    )}
+                    {!selectedQuestion.isCorrect && (
+                      <SecondaryButton href="/review">Review this mistake type</SecondaryButton>
+                    )}
+                    {selectedQuestion.isCorrect && <SecondaryButton href={replaySessionHref(selected)}>Replay session shape</SecondaryButton>}
                   </div>
                 </div>
               </div>

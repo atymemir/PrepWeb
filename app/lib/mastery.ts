@@ -70,7 +70,7 @@ export function subjectForTopic(subject: string | null | undefined): Subject {
   return "Reading";
 }
 
-export function focusedPracticeHref(subject: Subject, subskill: string, revisit = true): string {
+export function focusedPracticeHref(subject: Subject, subskill: string, revisit = false): string {
   const params = new URLSearchParams();
   params.set("subject", subject);
   params.set("subskill", subskill);
@@ -81,4 +81,3 @@ export function focusedPracticeHref(subject: Subject, subskill: string, revisit 
 export function focusedLessonHref(subskill: string): string {
   return `/lesson/${encodeURIComponent(subskill)}`;
 }
-

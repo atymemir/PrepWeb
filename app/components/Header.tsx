@@ -4,106 +4,101 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
 import { getSupabase } from "@/app/lib/supabase";
-import { getDurableEngagementSnapshot } from "@/app/lib/engagementDurable";
 import { normalizePlanTier, tierDefinition } from "@/app/lib/productTiers";
+import BrandWordmark from "@/app/components/BrandWordmark";
 
-const appNavItems = [
+type NavItem = {
+  href: string;
+  label: string;
+  match: string;
+};
+
+const appPrimaryNav: NavItem[] = [
   { href: "/today", label: "Today", match: "/today" },
   { href: "/practice?subject=Reading", label: "Practice", match: "/practice" },
   { href: "/review", label: "Review", match: "/review" },
   { href: "/skills", label: "Skills", match: "/skills" },
-  { href: "/lessons", label: "Lessons", match: "/lessons" },
   { href: "/coach", label: "Coach", match: "/coach" },
+];
+
+const appSecondaryNav: NavItem[] = [
   { href: "/history", label: "History", match: "/history" },
+  { href: "/lessons", label: "Lessons", match: "/lessons" },
   { href: "/leagues", label: "Community", match: "/leagues" },
 ];
 
-const publicNavItems = [
+const publicNav: NavItem[] = [
   { href: "/", label: "Product", match: "/" },
   { href: "/how-it-works", label: "How it works", match: "/how-it-works" },
-  { href: "/pricing", label: "Tiers", match: "/pricing" },
-  { href: "/demo", label: "Demo", match: "/demo" },
+  { href: "/pricing", label: "Plans", match: "/pricing" },
 ];
 
-function isActivePath(pathname: string, match: string) {
+function isActivePath(pathname: string, match: string): boolean {
   return match === "/" ? pathname === "/" : pathname.startsWith(match);
 }
 
-function isPublicPath(pathname: string) {
+function isPublicPath(pathname: string): boolean {
   return (
     pathname === "/" ||
     pathname.startsWith("/how-it-works") ||
-    pathname.startsWith("/welcome") ||
     pathname.startsWith("/pricing") ||
     pathname.startsWith("/login") ||
+    pathname.startsWith("/welcome") ||
+    pathname.startsWith("/terms") ||
+    pathname.startsWith("/privacy") ||
     pathname.startsWith("/demo")
   );
 }
 
-function Wordmark({ compact = false }: { compact?: boolean }) {
+function Wordmark() {
   return (
-    <span
-      className={[
-        "inline-flex items-end font-extrabold text-[#0e1b34]",
-        compact ? "text-base" : "text-lg",
-      ].join(" ")}
-      style={{
-        fontFamily: "Sora, Manrope, ui-sans-serif, system-ui, sans-serif",
-        letterSpacing: "-0.1em",
-        lineHeight: 1,
-      }}
-    >
-      <span className="text-[#0e1b34]">alg</span>
-      <span className="relative inline-block text-[0.72em] text-[#004aad]" style={{ transform: "translateY(0.18em)" }}>
-        a
+    <div className="flex min-w-0 items-center gap-2">
+      <BrandWordmark className="display-font text-base font-bold text-[#0e1b34] sm:text-lg" />
+      <span className="hidden rounded-full border border-[#c7dbff] bg-[#eff6ff] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-[#004aad] sm:inline-flex">
+        Beta
       </span>
-    </span>
+    </div>
   );
 }
 
 export default function Header() {
-  const pathname = usePathname();
+  const pathname = usePathname() || "/";
   const publicSurface = isPublicPath(pathname);
-  const [hasSession, setHasSession] = useState(false);
+
   const [ready, setReady] = useState(false);
-  const [statusLabel, setStatusLabel] = useState<string | null>(null);
-  const [streakLabel, setStreakLabel] = useState<string | null>(null);
+  const [hasSession, setHasSession] = useState(false);
   const [planLabel, setPlanLabel] = useState<string | null>(null);
 
   useEffect(() => {
     const supabase = getSupabase();
     let mounted = true;
 
-    async function syncStatus(userId: string | null) {
+    async function syncPlan(userId: string | null) {
       if (!userId) {
-        setStatusLabel(null);
-        setStreakLabel(null);
         setPlanLabel(null);
         return;
       }
 
       try {
-        const [snapshot, profileRes] = await Promise.all([
-          getDurableEngagementSnapshot(),
-          supabase
-            .from("profiles")
-            .select("plan_tier")
-            .eq("id", userId)
-            .single(),
-        ]);
+        const profileRes = await supabase
+          .from("profiles")
+          .select("plan_tier")
+          .eq("id", userId)
+          .single();
+
         if (!mounted) return;
-        setStatusLabel(`${snapshot.status.division.label} L${snapshot.status.level}`);
-        setStreakLabel(`${snapshot.identity.streakDays}d streak`);
-        if (!profileRes.error) {
-          const tier = tierDefinition(normalizePlanTier((profileRes.data as { plan_tier?: string | null })?.plan_tier));
-          setPlanLabel(tier.label);
-        } else {
+
+        if (profileRes.error) {
           setPlanLabel("Free");
+          return;
         }
+
+        const tier = tierDefinition(
+          normalizePlanTier((profileRes.data as { plan_tier?: string | null })?.plan_tier)
+        );
+        setPlanLabel(tier.label);
       } catch {
         if (!mounted) return;
-        setStatusLabel(null);
-        setStreakLabel(null);
         setPlanLabel(null);
       }
     }
@@ -113,7 +108,7 @@ export default function Header() {
         const { data } = await supabase.auth.getSession();
         if (!mounted) return;
         setHasSession(!!data.session);
-        await syncStatus(data.session?.user.id ?? null);
+        await syncPlan(data.session?.user.id ?? null);
       } finally {
         if (mounted) setReady(true);
       }
@@ -126,57 +121,34 @@ export default function Header() {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setHasSession(!!session);
       setReady(true);
-      void syncStatus(session?.user.id ?? null);
+      void syncPlan(session?.user.id ?? null);
     });
-
-    function onEngagementUpdated(event: Event) {
-      const detail = (event as CustomEvent<{ userId?: string }>).detail;
-      if (!detail?.userId) return;
-      void syncStatus(detail.userId);
-    }
-
-    window.addEventListener("alga-engagement-updated", onEngagementUpdated);
 
     return () => {
       mounted = false;
       subscription.unsubscribe();
-      window.removeEventListener("alga-engagement-updated", onEngagementUpdated);
     };
   }, []);
 
-  const navItems = publicSurface ? publicNavItems : hasSession ? appNavItems : publicNavItems;
+  const usingAppNav = hasSession && !publicSurface;
+  const mainNav = usingAppNav ? appPrimaryNav : publicNav;
 
   const rightAction = useMemo(() => {
     if (!ready) {
-      return <div className="h-9 w-24 shrink-0" aria-hidden="true" />;
+      return <div className="h-9 w-24 rounded-xl bg-white/70" aria-hidden="true" />;
     }
 
     if (hasSession) {
       return (
-        <div className="flex shrink-0 items-center gap-2">
-          {planLabel && statusLabel && streakLabel && (
-            <div className="hidden rounded-xl border border-[#b9d6ff] bg-[#eef5ff] px-3 py-2 text-xs font-semibold text-[#004aad] shadow-sm xl:block">
-              {planLabel} • {statusLabel} • {streakLabel}
-            </div>
+        <div className="flex items-center gap-2">
+          {planLabel && (
+            <span className="hidden rounded-full border border-[#d7e5fb] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#415677] md:inline-flex">
+              {planLabel}
+            </span>
           )}
-
-          <Link
-            href="/pricing"
-            className="hidden rounded-xl px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-100 hover:text-black sm:inline-flex"
-          >
-            Tiers
-          </Link>
-
-          <Link
-            href="/profile"
-            className="hidden rounded-xl px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-100 hover:text-black sm:inline-flex"
-          >
-            Profile
-          </Link>
-
           <Link
             href="/today"
-            className="inline-flex items-center justify-center rounded-xl border border-[#0e1b34] bg-[#0e1b34] px-3 py-2 text-sm font-semibold text-white transition hover:bg-[#192948]"
+            className="inline-flex items-center justify-center rounded-xl border border-[#0e1b34] bg-[linear-gradient(135deg,#0f1b34,#182d52)] px-3 py-2 text-sm font-semibold text-white shadow-sm hover:brightness-105"
           >
             Open app
           </Link>
@@ -185,38 +157,39 @@ export default function Header() {
     }
 
     return (
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex items-center gap-2">
         <Link
           href="/login"
-          className="inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-black transition hover:bg-gray-50"
+          className="inline-flex items-center justify-center rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-[#1f2d45] hover:border-gray-400"
         >
           Sign in
         </Link>
         <Link
           href="/login?mode=signup"
-          className="hidden items-center justify-center rounded-xl border border-[#0e1b34] bg-[#0e1b34] px-3 py-2 text-sm font-semibold text-white transition hover:bg-[#192948] sm:inline-flex"
+          className="hidden items-center justify-center rounded-xl border border-[#0e1b34] bg-[linear-gradient(135deg,#0f1b34,#182d52)] px-3 py-2 text-sm font-semibold text-white shadow-sm hover:brightness-105 sm:inline-flex"
         >
           Start free
         </Link>
       </div>
     );
-  }, [hasSession, planLabel, ready, statusLabel, streakLabel]);
+  }, [hasSession, planLabel, ready]);
 
   return (
-    <header className="sticky top-0 z-40 border-b border-white/60 bg-[rgba(245,248,253,0.86)] backdrop-blur-xl">
-      <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-4 py-3">
-        <div className="flex items-center gap-8">
+    <header className="sticky top-0 z-40 border-b border-white/70 bg-[linear-gradient(180deg,rgba(248,251,255,0.94),rgba(244,248,255,0.86))] backdrop-blur-xl">
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/95" aria-hidden="true" />
+      <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
+        <div className="flex min-w-0 items-center gap-4 lg:gap-6">
           <Link
             href={hasSession ? "/today" : "/"}
-            className="shrink-0 rounded-xl border border-white/80 bg-white/80 px-3 py-1.5 shadow-sm"
+            className="accent-sheen inline-flex shrink-0 items-center rounded-xl px-3 py-1.5 shadow-sm"
+            aria-label="algₐ prep home"
           >
-            <Wordmark compact />
+            <Wordmark />
           </Link>
 
           <nav className="hidden items-center gap-1 lg:flex">
-            {navItems.map((item) => {
+            {mainNav.map((item) => {
               const active = isActivePath(pathname, item.match);
-
               return (
                 <Link
                   key={item.href}
@@ -224,8 +197,8 @@ export default function Header() {
                   className={[
                     "rounded-xl px-3 py-2 text-sm font-semibold transition",
                     active
-                      ? "border border-[#0e1b34] bg-[#0e1b34] text-white shadow-sm"
-                      : "text-gray-600 hover:bg-white hover:text-black",
+                      ? "border border-[#0e1b34] bg-[linear-gradient(135deg,#0f1b34,#182d52)] text-white shadow-sm"
+                      : "text-[#4b5f7f] hover:bg-white hover:text-[#0e1b34]",
                   ].join(" ")}
                 >
                   {item.label}
@@ -233,16 +206,37 @@ export default function Header() {
               );
             })}
           </nav>
+
+          {usingAppNav && (
+            <nav className="hidden items-center gap-1 xl:flex">
+              {appSecondaryNav.map((item) => {
+                const active = isActivePath(pathname, item.match);
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={[
+                      "rounded-lg px-2.5 py-1.5 text-xs font-semibold transition",
+                      active
+                        ? "bg-[#edf4ff] text-[#0e1b34]"
+                        : "text-[#63779a] hover:bg-white hover:text-[#0e1b34]",
+                    ].join(" ")}
+                  >
+                    {item.label}
+                  </Link>
+                );
+              })}
+            </nav>
+          )}
         </div>
 
         {rightAction}
       </div>
 
-      <div className="border-t border-gray-200/70 lg:hidden">
-        <div className="mx-auto flex max-w-6xl gap-2 overflow-x-auto px-4 py-2.5">
-          {navItems.map((item) => {
+      <div className="border-t border-white/80 lg:hidden">
+        <nav className="mx-auto flex max-w-6xl gap-2 overflow-x-auto px-4 py-2.5">
+          {mainNav.map((item) => {
             const active = isActivePath(pathname, item.match);
-
             return (
               <Link
                 key={item.href}
@@ -251,28 +245,14 @@ export default function Header() {
                   "whitespace-nowrap rounded-xl px-3 py-2 text-sm font-semibold transition",
                   active
                     ? "border border-[#0e1b34] bg-[#0e1b34] text-white"
-                    : "border border-transparent bg-white/75 text-gray-600 hover:bg-white hover:text-black",
+                    : "border border-transparent bg-white/80 text-[#4b5f7f] hover:bg-white hover:text-[#0e1b34]",
                 ].join(" ")}
               >
                 {item.label}
               </Link>
             );
           })}
-
-          {!publicSurface && hasSession && (
-            <Link
-              href="/profile"
-              className={[
-                "whitespace-nowrap rounded-xl px-3 py-2 text-sm font-semibold transition",
-                pathname.startsWith("/profile")
-                  ? "border border-[#0e1b34] bg-[#0e1b34] text-white"
-                  : "border border-transparent bg-white/75 text-gray-600 hover:bg-white hover:text-black",
-              ].join(" ")}
-            >
-              Profile
-            </Link>
-          )}
-        </div>
+        </nav>
       </div>
     </header>
   );

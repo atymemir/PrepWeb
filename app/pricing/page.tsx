@@ -20,7 +20,6 @@ type ProfileTierRow = {
 };
 
 export default function PricingPage() {
-  const [loading, setLoading] = useState(true);
   const [busyTier, setBusyTier] = useState<PlanTier | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -31,7 +30,6 @@ export default function PricingPage() {
   const currentTier = useMemo(() => tierDefinition(planTier), [planTier]);
 
   async function load() {
-    setLoading(true);
     setErr(null);
     setMsg(null);
 
@@ -67,8 +65,6 @@ export default function PricingPage() {
       setPlanTier(normalizePlanTier(row.plan_tier ?? "free"));
     } catch (e: unknown) {
       setErr(errorMessage(e, "Failed to load tiers."));
-    } finally {
-      setLoading(false);
     }
   }
 
@@ -110,9 +106,9 @@ export default function PricingPage() {
   return (
     <main className="min-h-screen">
       <PageHeader
-        label="Tiered product shell"
+        label="Plans"
         title="Plans"
-        subtitle="Free stays useful. Pro and Ultimate add depth where the study loop gets more valuable."
+        subtitle="Start free. Upgrade only when you need deeper practice and coaching features."
         right={<Pill text={hasSession ? `${currentTier.label} plan` : "Public view"} tone={tierTone(planTier)} />}
       />
 
@@ -120,13 +116,13 @@ export default function PricingPage() {
         <div className="grid gap-5 p-6 lg:grid-cols-[1.1fr_0.9fr]">
           <div>
             <div className="inline-flex items-center rounded-full border border-[#3f5fa1] bg-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#bdd5ff]">
-              Plan logic
+              Plan overview
             </div>
             <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
               One study system, different depth.
             </h2>
             <p className="mt-3 max-w-2xl text-sm leading-relaxed text-[#d2dbec]">
-              Free gives the core SAT loop. Pro unlocks serious execution depth. Ultimate lifts feedback throughput for heavy users.
+              Free gives the core daily workflow. Pro unlocks deeper execution tools. Ultimate increases coaching throughput for heavy users.
             </p>
             <div className="mt-5 grid gap-3 sm:max-w-xl sm:grid-cols-2">
               {hasSession ? (
@@ -226,7 +222,7 @@ export default function PricingPage() {
       </div>
 
       <div className="mt-5 rounded-2xl border border-[#c7dbff] bg-[#f6faff] p-4 text-sm text-gray-700">
-        This environment uses direct tier switching to validate product shell behavior. Billing/checkout integration is intentionally separate.
+        This build uses direct plan switching for testing. Billing/checkout integration is separate.
       </div>
 
       <div className="mt-4 flex flex-wrap gap-3">

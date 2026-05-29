@@ -2,7 +2,7 @@ import { getSupabase } from "./supabase";
 import { getDurableEngagementSnapshot, type DurableEngagementSnapshot } from "./engagementDurable";
 import { getStudySessions, type StudySessionMode, type StudySessionRecord } from "./sessionHistory";
 import {
-  pickWeakestAcrossSubjects,
+  weaknessScore,
   type SkillRow,
 } from "./learningSignals";
 import {
@@ -123,6 +123,7 @@ export type StudentState = {
     topTopics: Array<{ topic: string; subject: string; count: number }>;
   };
   weakestSkill: WeakSkillSignal | null;
+  weakSkillTargets: WeakSkillSignal[];
   masteryDistribution: MasteryDistribution;
   movementDistribution: MovementDistribution;
   unstableCount: number;
@@ -156,6 +157,43 @@ function confidenceLabel(attempts: number): "Low" | "Medium" | "High" {
   if (attempts < 6) return "Low";
   if (attempts < 15) return "Medium";
   return "High";
+}
+
+function toWeakSkillSignal(subject: Subject, row: SkillRow): WeakSkillSignal {
+  const attempts = safeAttempts(row.attempts);
+  const accuracy = safeAccuracy(row.accuracy);
+  return {
+    subject,
+    subskill: row.subskill,
+    domain: row.domain,
+    skill: row.skill,
+    attempts,
+    accuracy,
+    accuracyPct: Math.round(accuracy * 100),
+    confidence: confidenceLabel(attempts),
+    mastery: masteryFor({ attempts: row.attempts, accuracy: row.accuracy }),
+    movement: movementFor({ attempts: row.attempts, accuracy: row.accuracy }),
+  };
+}
+
+function buildWeakSkillTargets(readingRows: SkillRow[], mathRows: SkillRow[], limit = 6): WeakSkillSignal[] {
+  return [
+    ...readingRows.map((row) => ({ subject: "Reading" as const, row })),
+    ...mathRows.map((row) => ({ subject: "Math" as const, row })),
+  ]
+    .sort((a, b) => {
+      const aScore = weaknessScore(a.row);
+      const bScore = weaknessScore(b.row);
+      if (aScore !== bScore) return aScore - bScore;
+
+      const aAttempts = safeAttempts(a.row.attempts);
+      const bAttempts = safeAttempts(b.row.attempts);
+      if (aAttempts !== bAttempts) return bAttempts - aAttempts;
+
+      return a.row.subskill.localeCompare(b.row.subskill);
+    })
+    .slice(0, limit)
+    .map(({ subject, row }) => toWeakSkillSignal(subject, row));
 }
 
 function debtPressure(count: number): "clear" | "light" | "moderate" | "heavy" {
@@ -223,7 +261,12 @@ function summarizeDueTopics(rows: DueQuestion[]): Array<{ topic: string; subject
     .slice(0, 4);
 }
 
-function hasComparableShape(a: StudySessionRecord, b: StudySessionRecord): boolean {
+function isMissingRpc(error: { code?: string; message?: string } | null | undefined, rpcName: string): boolean {
+  const message = String(error?.message || "").toLowerCase();
+  return error?.code === "PGRST202" || message.includes(rpcName.toLowerCase());
+}
+
+export function hasComparableSessionShape(a: StudySessionRecord, b: StudySessionRecord): boolean {
   if (a.mode !== b.mode) return false;
   if (a.mode === "review") return true;
   if ((a.subject ?? "Mixed") !== (b.subject ?? "Mixed")) return false;
@@ -248,7 +291,7 @@ function sessionMovementProof(sessions: StudySessionRecord[]): SessionMovementPr
 
   let previousComparable: StudySessionRecord | null = null;
   for (let i = 1; i < sessions.length; i += 1) {
-    if (hasComparableShape(latest, sessions[i])) {
+    if (hasComparableSessionShape(latest, sessions[i])) {
       previousComparable = sessions[i];
       break;
     }
@@ -322,32 +365,39 @@ function createRecommendedAction(args: {
   movement: SessionMovementProof;
   recommendedPracticeMode: "trainer" | "timed" | "exam";
 }): RecommendedAction {
+  const modeLabel =
+    args.recommendedPracticeMode === "trainer"
+      ? "quick practice"
+      : args.recommendedPracticeMode === "timed"
+      ? "timed set"
+      : "full practice test";
+
   if (args.debtCount > 0) {
     const block = Math.min(12, args.debtCount);
     return {
       kind: "recover_debt",
-      title: `Clear ${block} review debt first`,
+      title: `Review ${block} mistakes first`,
       reason: args.debtCount > 12
-        ? `You have ${args.debtCount} due review items. More new practice now will hide active weaknesses.`
-        : `You have ${args.debtCount} due review items. Recovery should lead the loop.`,
-      payoff: "Removes unstable memory debt and makes next practice signal cleaner.",
+        ? `You have ${args.debtCount} mistakes waiting for review. New practice now will blur the weak areas.`
+        : `You have ${args.debtCount} mistakes waiting for review. Review should come first.`,
+      payoff: "Clears old mistakes so your next practice set gives cleaner evidence.",
       primaryHref: "/review",
       primaryLabel: "Start review block",
       secondaryHref: args.weakest
-        ? focusedPracticeHref(args.weakest.subject, args.weakest.subskill, true)
+        ? focusedPracticeHref(args.weakest.subject, args.weakest.subskill)
         : "/practice?subject=Reading",
-      secondaryLabel: args.weakest ? `Queue ${args.weakest.subskill}` : "Queue focused practice",
+      secondaryLabel: args.weakest ? `Practice ${args.weakest.subskill}` : "Start focused practice",
     };
   }
 
   if (args.weakest) {
     return {
       kind: "attack_weak_skill",
-      title: `Attack ${args.weakest.subskill}`,
+      title: `Practice ${args.weakest.subskill}`,
       reason: `${args.weakest.accuracyPct}% over ${args.weakest.attempts} attempts in ${args.weakest.subject}. ${args.weakest.confidence} confidence.`,
-      payoff: "Concentrating volume here should produce the biggest immediate movement.",
-      primaryHref: focusedPracticeHref(args.weakest.subject, args.weakest.subskill, true),
-      primaryLabel: `Run ${args.recommendedPracticeMode} practice`,
+      payoff: "This is your biggest score opportunity right now.",
+      primaryHref: focusedPracticeHref(args.weakest.subject, args.weakest.subskill),
+      primaryLabel: `Start ${modeLabel}`,
       secondaryHref: focusedLessonHref(args.weakest.subskill),
       secondaryLabel: "Open repair lesson",
     };
@@ -357,8 +407,8 @@ function createRecommendedAction(args: {
     return {
       kind: "replay_recent",
       title: "Replay your last session shape",
-      reason: "Your weakest topic is not stable yet. Repeating a comparable block creates interpretable movement.",
-      payoff: "Generates clear before/after evidence for history and skills routing.",
+      reason: "Your weak areas are not stable yet. Repeating a comparable block makes progress easier to measure.",
+      payoff: "Creates clear before/after evidence for your next decision.",
       primaryHref: "/history",
       primaryLabel: "Replay from history",
       secondaryHref: "/practice?subject=Reading",
@@ -368,9 +418,9 @@ function createRecommendedAction(args: {
 
   return {
     kind: "generate_signal",
-    title: "Generate first useful signal",
-    reason: "You need one completed practice block before repair routing gets precise.",
-    payoff: "Unlocks weakest-skill detection, review debt routing, and movement tracking.",
+    title: "Complete your first short set",
+    reason: "You need one finished practice block before the system can prioritize weak areas.",
+    payoff: "Unlocks your first real daily plan.",
     primaryHref: "/practice?subject=Reading",
     primaryLabel: "Start practice",
     secondaryHref: "/skills",
@@ -424,9 +474,9 @@ function buildContextualMessages(args: {
     base.push({
       id: "debt-priority",
       tone: args.debtCount > 12 ? "danger" : "accent",
-      text: `You have ${args.debtCount} review debt. Clear ${clearNow} first before fresh volume.`,
+      text: `You have ${args.debtCount} mistakes waiting for review. Clear ${clearNow} first before new volume.`,
       actionHref: "/review",
-      actionLabel: "Clear debt",
+      actionLabel: "Start review",
     });
   }
 
@@ -439,7 +489,7 @@ function buildContextualMessages(args: {
       id: "weakest-focus",
       tone: args.weakest.mastery === "Unstable" ? "danger" : "accent",
       text: sampleCaution,
-      actionHref: focusedPracticeHref(args.weakest.subject, args.weakest.subskill, true),
+      actionHref: focusedPracticeHref(args.weakest.subject, args.weakest.subskill),
       actionLabel: "Drill weak topic",
     });
   }
@@ -477,8 +527,8 @@ function buildContextualMessages(args: {
       id: "review-why",
       tone: args.debtCount > 0 ? "danger" : "success",
       text: args.debtCount > 0
-        ? "Debt recovery is the bottleneck. Clear unstable memory before attacking new content."
-        : "Debt is clear. Route to weakest-skill practice while recovery is clean.",
+        ? "Review is the bottleneck right now. Clear old mistakes before adding new volume."
+        : "Review is clear. Route to weak-skill practice while your queue is clean.",
       actionHref: args.debtCount > 0 ? "/review" : args.action.primaryHref,
       actionLabel: args.debtCount > 0 ? "Run review" : args.action.primaryLabel,
     },
@@ -513,7 +563,7 @@ function buildContextualMessages(args: {
     community: {
       id: "community-proof",
       tone: "neutral",
-      text: "Share real work proof: debt cleared, streak held, or weakest-topic improvement.",
+      text: "Share real work proof: review queue cleared, streak held, or weak-topic improvement.",
       actionHref: "/leagues",
       actionLabel: "Share proof",
     },
@@ -579,12 +629,13 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
   const userId = await requireUserId();
   const supabase = getSupabase();
 
-  const [profile, engagementResult, readingRes, mathRes, dueRes, sessionsResult] = await Promise.all([
+  const [profile, engagementResult, readingRes, mathRes, dueRes, dueCountRes, sessionsResult] = await Promise.all([
     requireProfile(userId),
     getDurableEngagementSnapshot().catch(() => null as DurableEngagementSnapshot | null),
     supabase.rpc("get_skill_mastery", { p_subject: "Reading" }),
     supabase.rpc("get_skill_mastery", { p_subject: "Math" }),
     supabase.rpc("get_due_review_questions", { p_limit: dueLimit }),
+    supabase.rpc("get_due_review_count", { p_scan: 2000 }),
     getStudySessions(historyLimit).catch(() => [] as StudySessionRecord[]),
   ]);
 
@@ -596,34 +647,28 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
   const mathRows = (mathRes.data ?? []) as SkillRow[];
   const allRows = [...readingRows, ...mathRows];
   const dueQuestions = (dueRes.data ?? []) as DueQuestion[];
-
-  const weakestRaw = pickWeakestAcrossSubjects(readingRows, mathRows);
-  const weakest: WeakSkillSignal | null = weakestRaw
-    ? {
-        subject: weakestRaw.subject,
-        subskill: weakestRaw.row.subskill,
-        domain: weakestRaw.row.domain,
-        skill: weakestRaw.row.skill,
-        attempts: safeAttempts(weakestRaw.row.attempts),
-        accuracy: safeAccuracy(weakestRaw.row.accuracy),
-        accuracyPct: Math.round(safeAccuracy(weakestRaw.row.accuracy) * 100),
-        confidence: confidenceLabel(safeAttempts(weakestRaw.row.attempts)),
-        mastery: masteryFor({ attempts: weakestRaw.row.attempts, accuracy: weakestRaw.row.accuracy }),
-        movement: movementFor({ attempts: weakestRaw.row.attempts, accuracy: weakestRaw.row.accuracy }),
-      }
-    : null;
+  let dueCount = dueQuestions.length;
+  if (dueCountRes.error) {
+    if (!isMissingRpc(dueCountRes.error, "get_due_review_count")) {
+      throw new Error(dueCountRes.error.message);
+    }
+  } else {
+    dueCount = Math.max(0, Number(dueCountRes.data ?? 0));
+  }
+  const weakSkillTargets = buildWeakSkillTargets(readingRows, mathRows);
+  const weakest = weakSkillTargets[0] ?? null;
 
   const movement = sessionMovementProof(sessionsResult);
   const tier = tierDefinition(profile.planTier);
   const practiceMode = recommendedMode({
-    debtCount: dueQuestions.length,
+    debtCount: dueCount,
     weakest,
     sessions: sessionsResult,
     examModeAvailable: tier.limits.examMode,
   });
 
   const action = createRecommendedAction({
-    debtCount: dueQuestions.length,
+    debtCount: dueCount,
     weakest,
     movement,
     recommendedPracticeMode: practiceMode,
@@ -634,7 +679,7 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
   const contextualMessages: StudentState["contextualMessages"] = {
     today: buildContextualMessages({
       route: "today",
-      debtCount: dueQuestions.length,
+      debtCount: dueCount,
       weakest,
       action,
       movement,
@@ -642,7 +687,7 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
     }),
     practice: buildContextualMessages({
       route: "practice",
-      debtCount: dueQuestions.length,
+      debtCount: dueCount,
       weakest,
       action,
       movement,
@@ -650,7 +695,7 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
     }),
     review: buildContextualMessages({
       route: "review",
-      debtCount: dueQuestions.length,
+      debtCount: dueCount,
       weakest,
       action,
       movement,
@@ -658,7 +703,7 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
     }),
     skills: buildContextualMessages({
       route: "skills",
-      debtCount: dueQuestions.length,
+      debtCount: dueCount,
       weakest,
       action,
       movement,
@@ -666,7 +711,7 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
     }),
     history: buildContextualMessages({
       route: "history",
-      debtCount: dueQuestions.length,
+      debtCount: dueCount,
       weakest,
       action,
       movement,
@@ -674,7 +719,7 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
     }),
     lessons: buildContextualMessages({
       route: "lessons",
-      debtCount: dueQuestions.length,
+      debtCount: dueCount,
       weakest,
       action,
       movement,
@@ -682,7 +727,7 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
     }),
     coach: buildContextualMessages({
       route: "coach",
-      debtCount: dueQuestions.length,
+      debtCount: dueCount,
       weakest,
       action,
       movement,
@@ -690,7 +735,7 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
     }),
     community: buildContextualMessages({
       route: "community",
-      debtCount: dueQuestions.length,
+      debtCount: dueCount,
       weakest,
       action,
       movement,
@@ -698,7 +743,7 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
     }),
     other: buildContextualMessages({
       route: "other",
-      debtCount: dueQuestions.length,
+      debtCount: dueCount,
       weakest,
       action,
       movement,
@@ -725,12 +770,13 @@ export async function fetchStudentState(options: StudentStateFetchOptions = {}):
         }
       : null,
     reviewDebt: {
-      dueCount: dueQuestions.length,
-      blockSize: Math.min(12, dueQuestions.length),
-      pressure: debtPressure(dueQuestions.length),
+      dueCount,
+      blockSize: Math.min(12, dueCount),
+      pressure: debtPressure(dueCount),
       topTopics: summarizeDueTopics(dueQuestions),
     },
     weakestSkill: weakest,
+    weakSkillTargets,
     masteryDistribution: summarizeMastery(allRows),
     movementDistribution: summarizeMovement(allRows),
     unstableCount: allRows.filter((row) => masteryFor({ attempts: row.attempts, accuracy: row.accuracy }) === "Unstable").length,

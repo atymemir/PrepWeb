@@ -23,9 +23,21 @@ function isStudyPath(pathname: string): boolean {
   return STUDY_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
+function isCoachDockFriendlyPath(pathname: string): boolean {
+  return (
+    pathname.startsWith("/today") ||
+    pathname.startsWith("/skills") ||
+    pathname.startsWith("/coach") ||
+    pathname.startsWith("/history") ||
+    pathname.startsWith("/lessons") ||
+    pathname.startsWith("/lesson")
+  );
+}
+
 export default function AppFrame({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() || "/";
   const studySurface = useMemo(() => isStudyPath(pathname), [pathname]);
+  const coachDockSurface = useMemo(() => isCoachDockFriendlyPath(pathname), [pathname]);
   const [hasSession, setHasSession] = useState(false);
 
   useEffect(() => {
@@ -52,19 +64,23 @@ export default function AppFrame({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  const showPublicFooter = !studySurface || !hasSession;
+
   return (
     <>
       <main
         className={
           studySurface
-            ? "app-canvas mx-auto max-w-6xl px-4 pb-28 pt-5 md:pb-12 md:pt-7"
-            : "mx-auto max-w-6xl px-4 pb-14 pt-5 md:pt-8"
+            ? "app-canvas mx-auto max-w-6xl px-4 pb-24 pt-5 md:pb-10 md:pt-7"
+            : "mx-auto max-w-6xl px-4 pb-12 pt-5 md:pt-8"
         }
       >
         {children}
       </main>
-      <SiteFooter />
-      {studySurface && hasSession ? <FloatingCoachDock /> : null}
+
+      {showPublicFooter ? <SiteFooter /> : null}
+
+      {studySurface && hasSession && coachDockSurface ? <FloatingCoachDock /> : null}
     </>
   );
 }
